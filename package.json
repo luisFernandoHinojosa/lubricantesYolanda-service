@@ -1,5 +1,5 @@
 {
-  "name": "milenium-backend",
+  "name": "lubricantes-yolanda-service",
   "version": "1.0.0",
   "main": "src/server.js",
   "type": "module",
@@ -10,15 +10,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Ochoa42/milenium-backend.git"
+    "url": "git+https://github.com/Ochoa42/lubricantes-yolanda-service.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/Ochoa42/milenium-backend/issues"
+    "url": "https://github.com/Ochoa42/lubricantes-yolanda-service/issues"
   },
-  "homepage": "https://github.com/Ochoa42/milenium-backend#readme",
+  "homepage": "https://github.com/Ochoa42/lubricantes-yolanda-service#readme",
   "description": "",
   "dependencies": {
     "axios": "^1.11.0",

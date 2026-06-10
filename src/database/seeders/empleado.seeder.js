@@ -28,16 +28,16 @@ export const seedEmpleadoUsuario = async () => {
 
         const nuevoUsuario = await db.Usuario.create({
             name_user: 'milenka123',
-            email: 'admin@ferreteriamilenium.com',
+            email: 'sadm@lubricantesYolanda.com',
             password_hash: password_hash,
             rol_id: rolAdmin.id,
             id_sucursal: sucursal.id
         }, { transaction });
 
         await db.Empleado.create({
-            nombre: 'Geraldine',
-            apellido_paterno: 'Milenka',
-            apellido_materno: 'Bernal',
+            nombre: 'Yolanda',
+            apellido_paterno: 'Lubricantes',
+            apellido_materno: 'Lubri',
             ci: '12345678',
             esta_activo: true,
             usuario_id: nuevoUsuario.id

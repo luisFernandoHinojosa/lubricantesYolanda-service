@@ -2,12 +2,12 @@ import db from '../index.js';
 
 const SUCURSALES_INICIALES = [
     {
-        nombre: 'Milenium',
+        nombre: 'Lubricantes Yolanda',
         direccion: 'Av. Principal Internacional',
-        telefono: '72194095',
-        correo_electronico: 'milenium@gmail.com',
+        telefono: '72123855',
+        correo_electronico: 'lubricantesyolanda@gmail.com',
         ciudad: 'Santa Cruz - San Julian',
-        responsable: 'Geraldine Milenka Alarcon Bernal'
+        responsable: 'Yolanda lubricantes'
     }
 ]
 
