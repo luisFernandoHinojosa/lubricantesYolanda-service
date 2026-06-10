@@ -6,8 +6,8 @@ export const generatePhotoURL = async (file, defaultPhotoUrl) => {
         return defaultPhotoUrl;
     }
     const folder = config.server.nodeEnv === 'development'
-        ? 'desarrollo/milenium'
-        : 'produccion/milenium';
+        ? 'desarrollo/lubricantesY'
+        : 'produccion/lubricantesY';
     return await UploadFile.uploadToCloudinary(folder, file.buffer);
 };
 
