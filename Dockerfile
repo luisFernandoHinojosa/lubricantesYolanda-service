@@ -20,6 +20,6 @@ COPY --from=builder /app/package*.json ./
 # Copiamos el resto del código fuente
 COPY --from=builder /app .
 # El puerto que tu backend expone internamente
-EXPOSE 3001
+EXPOSE 3005
 # El comando para iniciar tu aplicación
 CMD [ "npm", "start" ]

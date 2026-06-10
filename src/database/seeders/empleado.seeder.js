@@ -27,7 +27,7 @@ export const seedEmpleadoUsuario = async () => {
         const password_hash = await bcrypt.hash('12345678', salt);
 
         const nuevoUsuario = await db.Usuario.create({
-            name_user: 'milenka123',
+            name_user: 'yolanda123',
             email: 'sadm@lubricantesYolanda.com',
             password_hash: password_hash,
             rol_id: rolAdmin.id,

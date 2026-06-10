@@ -9,16 +9,14 @@ import { runSeeders } from './database/seeders/index.js';
 
 const startServer = async () => {
   try {
+    console.log('Paso 1');
     await db.sequelize.authenticate();
     // await db.sequelize.query('DROP SCHEMA IF EXISTS public CASCADE;');
     // await db.sequelize.query('CREATE SCHEMA public;');
-    // mi comentario
     await db.sequelize.sync({ /*force: true */ });
-
     await runSeeders();
     cache.setClient(redisClient);
     logger.info('CacheService conectado a Redis');
-
     const server = app.listen(config.server.port, () => {
       logger.info(`Server is running on port ${config.server.port}`);
       logger.info(`Environment: ${config.server.nodeEnv}`)
