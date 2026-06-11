@@ -156,6 +156,7 @@ export class ProductoRepository {
     const producto = await this.productoModel.create({
       codigo_barras: data.codigo_barras || null,
       nombre_comercial: data.nombre_comercial,
+      descripcion: data.descripcion || null,
       id_categoria: data.id_categoria,
       id_marca: data.id_marca,
       id_unidad_medida: data.id_unidad_medida,

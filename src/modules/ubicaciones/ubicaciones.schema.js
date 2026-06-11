@@ -4,8 +4,8 @@ const ubicacionBaseSchema = z.object({
   id_sucursal: z.string().uuid('ID de sucursal inválido'),
   nombre: z.string().min(2, 'El nombre debe tener al menos 2 caracteres.'),
   descripcion: z.string().optional(),
-  tipo_area: z.enum(['Venta', 'Deposito', 'Merma'], {
-      errorMap: () => ({ message: 'El tipo de área debe ser Venta, Deposito o Merma.' })
+  tipo_area: z.enum(['VENTA', 'DEPOSITO', 'MERMA'], {
+    errorMap: () => ({ message: 'El tipo de área debe ser VENTA, DEPOSITO o MERMA.' })
   }),
   esta_activo: z.boolean().optional(),
 });

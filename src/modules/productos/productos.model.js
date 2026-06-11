@@ -41,6 +41,10 @@ export default (sequelize) => {
             type: DataTypes.STRING(255),
             allowNull: false,
         },
+        descripcion: {
+            type: DataTypes.STRING(1000),
+            allowNull: true,
+        },
         id_categoria: {
             type: DataTypes.UUID,
             allowNull: false

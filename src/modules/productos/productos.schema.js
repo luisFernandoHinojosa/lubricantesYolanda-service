@@ -3,6 +3,7 @@ import { z } from 'zod';
 const productoBaseSchema = z.object({
     codigo_barras: z.string().optional().nullable(),
     nombre_comercial: z.string().min(2, 'El nombre comercial debe tener al menos 2 caracteres.'),
+    descripcion: z.string().max(1000, 'La descripción no puede superar los 1000 caracteres.').optional().nullable(),
     id_categoria: z.string().uuid('ID de categoría inválido.'),
     id_marca: z.string().uuid('ID de marca inválido.'),
     id_unidad_medida: z.string().uuid('ID de unidad de medida inválido.'),
