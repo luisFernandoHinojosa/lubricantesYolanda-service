@@ -13,10 +13,15 @@ const startServer = async () => {
     await db.sequelize.authenticate();
     // await db.sequelize.query('DROP SCHEMA IF EXISTS public CASCADE;');
     // await db.sequelize.query('CREATE SCHEMA public;');
+    console.log('Paso 2: Sincronizando modelos...');
     await db.sequelize.sync({ /*force: true */ });
+    console.log('Paso 3: Corriendo Seeders...');
     await runSeeders();
+    console.log('Paso 4: ¡Salimos de runSeeders() con éxito!');
+    console.log('Paso 5: Conectando a Redis...');
     cache.setClient(redisClient);
     logger.info('CacheService conectado a Redis');
+    console.log('Paso 6: Abriendo puerto del servidor...');
     const server = app.listen(config.server.port, () => {
       logger.info(`Server is running on port ${config.server.port}`);
       logger.info(`Environment: ${config.server.nodeEnv}`)
