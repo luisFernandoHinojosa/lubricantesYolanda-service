@@ -1,6 +1,6 @@
 import express from 'express';
 import * as stockDistribucionController from './stock_distribucion.controller.js';
-import { validateCreateStockDistribucion, validateUpdateStockDistribucion, validateTrasladoStock, checkStockDistribucionExists } from './stock_distribucion.middleware.js';
+import { validateCreateStockDistribucion, validateUpdateStockDistribucion, validateTrasladoStock, validateAjusteStock, checkStockDistribucionExists } from './stock_distribucion.middleware.js';
 import { sanitizeInput } from '../../middlewares/sanitizer.middleware.js';
 import { authenticate } from '../auth/auth.middleware.js';
 
@@ -8,6 +8,7 @@ const router = express.Router();
 
 router.use(authenticate);
 router.post('/traslado', sanitizeInput, validateTrasladoStock, stockDistribucionController.traslado);
+router.post('/:id/ajuste', sanitizeInput, checkStockDistribucionExists, validateAjusteStock, stockDistribucionController.ajustarStock);
 
 router.get('/total/:id_producto', stockDistribucionController.getTotalStock);
 

@@ -32,7 +32,8 @@ export class LoteController {
 
   create = async (req, res, next) => {
     try {
-      const lote = await lotesService.create(req.body);
+      const id_usuario = req.user ? req.user.id : null;
+      const lote = await lotesService.create(req.body, id_usuario);
       res.status(201).json({ status: 'success', data: lote });
     } catch (err) {
       next(err);

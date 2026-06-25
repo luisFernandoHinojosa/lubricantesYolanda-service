@@ -209,3 +209,40 @@ export const transferirStock = async (data, id_usuario) => {
         return { success: true };
     });
 };
+
+export const ajustarStock = async (stockDistribucion, data, id_usuario) => {
+    const { cantidad, observacion } = data;
+    const qtyAjuste = parseFloat(cantidad);
+
+    return await db.sequelize.transaction(async (t) => {
+        if (qtyAjuste < 0) {
+            const decrementoAbsoluto = Math.abs(qtyAjuste);
+            if (parseFloat(stockDistribucion.cantidad_actual) < decrementoAbsoluto) {
+                const err = new Error(
+                    `Stock insuficiente para realizar el ajuste negativo (Actual: ${stockDistribucion.cantidad_actual}, Ajuste: ${qtyAjuste}).`
+                );
+                err.statusCode = 400;
+                throw err;
+            }
+            await stockDistribucion.decrement('cantidad_actual', { by: decrementoAbsoluto, transaction: t });
+        } else {
+            await stockDistribucion.increment('cantidad_actual', { by: qtyAjuste, transaction: t });
+        }
+
+        const tipo_movimiento = 'AJUSTE';
+
+        await db.KardexMovimiento.create({
+            id_lote: stockDistribucion.id_lote,
+            tipo_movimiento,
+            cantidad: Math.abs(qtyAjuste),
+            id_ubicacion_origen: qtyAjuste < 0 ? stockDistribucion.id_ubicacion : null,
+            id_ubicacion_fisica_origen: qtyAjuste < 0 ? stockDistribucion.id_ubicacion_fisica : null,
+            id_ubicacion_destino: qtyAjuste > 0 ? stockDistribucion.id_ubicacion : null,
+            id_ubicacion_fisica_destino: qtyAjuste > 0 ? stockDistribucion.id_ubicacion_fisica : null,
+            id_usuario,
+            observacion: observacion || `Ajuste manual de stock (${qtyAjuste > 0 ? '+' : ''}${qtyAjuste})`
+        }, { transaction: t });
+
+        return { success: true };
+    });
+};

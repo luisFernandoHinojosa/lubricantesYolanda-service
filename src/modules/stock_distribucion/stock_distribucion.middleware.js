@@ -1,4 +1,4 @@
-import { createStockDistribucionSchema, updateStockDistribucionSchema, trasladoStockSchema } from './stock_distribucion.schema.js';
+import { createStockDistribucionSchema, updateStockDistribucionSchema, trasladoStockSchema, ajusteStockSchema } from './stock_distribucion.schema.js';
 import * as stockDistribucionService from './stock_distribucion.service.js';
 import { z } from 'zod';
 
@@ -34,3 +34,4 @@ export const checkStockDistribucionExists = async (req, res, next) => {
 export const validateCreateStockDistribucion = validateRequest(createStockDistribucionSchema);
 export const validateUpdateStockDistribucion = validateRequest(updateStockDistribucionSchema);
 export const validateTrasladoStock = validateRequest(trasladoStockSchema);
+export const validateAjusteStock = validateRequest(ajusteStockSchema);

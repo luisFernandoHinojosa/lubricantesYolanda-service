@@ -51,3 +51,13 @@ export const getStockPorUbicacion = asyncHandler(async (req, res) => {
     const data = await stockDistribucionService.getStockPorUbicacionForProduct(id_producto);
     res.status(200).json({ status: 'success', data });
 });
+
+export const ajustarStock = asyncHandler(async (req, res, next) => {
+    const id_usuario = req.user ? req.user.id : null;
+    await stockDistribucionService.ajustarStock(req.stockDistribucion, req.body, id_usuario);
+    
+    res.status(200).json({
+        status: 'success',
+        message: 'El ajuste de stock se ejecutó de forma correcta.'
+    });
+});

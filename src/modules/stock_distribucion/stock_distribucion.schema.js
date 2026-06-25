@@ -16,3 +16,8 @@ export const trasladoStockSchema = z.object({
 
 export const createStockDistribucionSchema = stockDistribucionSchema;
 export const updateStockDistribucionSchema = stockDistribucionSchema.partial();
+
+export const ajusteStockSchema = z.object({
+    cantidad: z.number().refine(val => val !== 0, { message: 'La cantidad de ajuste no puede ser cero.' }),
+    observacion: z.string().min(1, 'La observación es obligatoria para realizar un ajuste.')
+});
