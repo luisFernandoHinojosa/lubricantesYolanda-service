@@ -9,6 +9,7 @@ import {
     getVenta,
     listarVentas,
     getResumenSesion,
+    anularVenta,
 } from '../ventas/ventas.controller.js';
 
 const router = Router();
@@ -19,5 +20,6 @@ router.post('/', requireSesionAbierta, validateVenta, crearVenta);
 router.get('/', listarVentas);
 router.get('/sesion/:id_sesion/resumen', getResumenSesion);
 router.get('/:id', getVenta);
+router.put('/:id/anular', anularVenta);
 
 export default router;

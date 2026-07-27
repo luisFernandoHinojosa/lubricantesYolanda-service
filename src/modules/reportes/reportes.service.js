@@ -9,6 +9,7 @@ const {
     Venta, DetalleVenta, Compra, DetalleCompra, Movimiento, CategoriaMovimiento,
     Producto, Presentacion, Lote, StockDistribucion, KardexMovimiento,
     SesionCaja, Cliente, Empleado, Sucursal, Ubicacion, Categoria,
+    Devolucion,
     sequelize
 } = db;
 
@@ -16,7 +17,10 @@ export const getReporteVentas = async (query = {}) => {
     const { desde, hasta, id_sucursal, id_empleado, metodo_pago, agrupar_por = 'dia' } = query;
     const { start, end } = parseDateRange(desde, hasta);
 
-    const where = { createdAt: { [Op.between]: [start, end] } };
+    const where = { 
+        createdAt: { [Op.between]: [start, end] },
+        esta_activo: true // <-- SOLUCION: Excluir ventas anuladas
+    };
     if (id_sucursal) where.id_sucursal = id_sucursal;
     if (id_empleado) where.id_empleado = id_empleado;
     if (metodo_pago) where.metodo_pago = metodo_pago;
@@ -34,8 +38,41 @@ export const getReporteVentas = async (query = {}) => {
         raw: true,
     });
 
+    const devoluciones = await Devolucion.findAll({
+        where: { 
+            createdAt: { [Op.between]: [start, end] },
+            estado: 'COMPLETADA',
+            esta_activo: true 
+        },
+        attributes: [
+            'tipo',
+            [fn('SUM', col('monto_devuelto')), 'total_devuelto'],
+            [fn('SUM', col('monto_diferencia')), 'total_diferencia']
+        ],
+        group: ['tipo'],
+        raw: true
+    });
+
+    let totalDevoluciones = 0;
+    let totalDiferenciasCambios = 0;
+
+    devoluciones.forEach(d => {
+        if (d.tipo === 'DEVOLUCION') {
+            totalDevoluciones += parseFloat(d.total_devuelto || 0);
+        } else if (d.tipo === 'CAMBIO') {
+            totalDiferenciasCambios += parseFloat(d.total_diferencia || 0);
+        }
+    });
+
+    const ventasBrutas = parseFloat(stats.total_ventas || 0);
+    // Para devoluciones netas restamos lo devuelto; para cambios sumamos la diferencia (puede ser + o -)
+    const ventasNetas = ventasBrutas - totalDevoluciones + totalDiferenciasCambios;
+
     const resumen = {
-        total_ventas: formatCurrency(stats.total_ventas),
+        total_ventas: formatCurrency(ventasNetas),
+        ventas_brutas: formatCurrency(ventasBrutas),
+        ventas_netas: formatCurrency(ventasNetas),
+        total_devoluciones: formatCurrency(totalDevoluciones),
         cantidad_ventas: parseInt(stats.cantidad_ventas) || 0,
         ticket_promedio: formatCurrency(stats.ticket_promedio),
         total_descuentos: formatCurrency(stats.total_descuentos),
