@@ -95,3 +95,18 @@ export const getResumenSesion = asyncHandler(async (req, res, next) => {
         next(err);
     }
 });
+
+export const anularVenta = asyncHandler(async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const { id: id_usuario } = req.user;
+        const ventaAnulada = await ventaService.anularVenta(id, id_usuario);
+        return res.status(200).json({
+            status: "success",
+            message: 'Venta anulada exitosamente.',
+            //data: ventaAnulada 
+        });
+    } catch (err) {
+        next(err);
+    }
+});

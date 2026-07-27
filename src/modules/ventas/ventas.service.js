@@ -80,6 +80,43 @@ const getStockDisponible = async (id_producto, id_sucursal, transaction) => {
     return { total, registros };
 };
 
+const reingresarStock = async (id_producto, id_sucursal, unidades, transaction) => {
+    const registro = await StockDistribucion.findOne({
+        include: [
+            {
+                model: Lote,
+                as: 'lote',
+                where: { id_producto },
+                attributes: ['id', 'codigo_lote', 'fecha_ingreso'],
+                required: true,
+            },
+            {
+                model: Ubicacion,
+                as: 'ubicacion',
+                where: { id_sucursal },
+                attributes: ['id', 'nombre'],
+                required: true,
+            },
+        ],
+        order: [[{ model: Lote, as: 'lote' }, 'fecha_ingreso', 'DESC']],
+        transaction,
+        lock: true,
+    });
+
+    if (!registro) {
+        const err = new Error(`No se encontró un registro de stock para reingresar el producto.`);
+        err.statusCode = 422;
+        throw err;
+    }
+
+    await registro.increment('cantidad_actual', { by: unidades, transaction });
+
+    return {
+        id_lote: registro.id_lote,
+        id_ubicacion: registro.id_ubicacion,
+    };
+};
+
 const validarYEnriquecerItems = async (items, id_sucursal, transaction) => {
     const itemsEnriquecidos = [];
 
@@ -314,6 +351,89 @@ export const crearVenta = async ({
     return getVentaById(ventaCreada.id);
 };
 
+export const anularVenta = async (id_venta, id_usuario) => {
+    const empleado = await Empleado.findOne({ where: { usuario_id: id_usuario } });
+    if (!empleado) {
+        const err = new Error('El usuario no tiene un empleado asociado.');
+        err.statusCode = 400;
+        throw err;
+    }
+    const id_empleado = empleado.id;
+
+    const venta = await Venta.findByPk(id_venta, {
+        include: [
+            { model: DetalleVenta, as: 'detalles' },
+            { model: Cliente, as: 'cliente' },
+        ],
+    });
+
+    if (!venta) {
+        const err = new Error('Venta no encontrada.');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    if (!venta.esta_activo) {
+        const err = new Error('La venta ya se encuentra anulada.');
+        err.statusCode = 400;
+        throw err;
+    }
+
+    await sequelize.transaction(async (t) => {
+        // 1. Desactivar venta
+        await venta.update({ esta_activo: false }, { transaction: t });
+
+        // 2. Reversar stock y kardex
+        for (const detalle of venta.detalles) {
+            const factor = parseFloat(detalle.factor_aplicado);
+            const unidades_base = parseFloat(detalle.cantidad) * factor;
+
+            const { id_lote, id_ubicacion } = await reingresarStock(
+                detalle.id_producto,
+                venta.id_sucursal,
+                unidades_base,
+                t
+            );
+
+            if (detalle.numero_serie) {
+                await ProductoSerie.update(
+                    { estado: 'DISPONIBLE' },
+                    { where: { numero_serie: detalle.numero_serie }, transaction: t }
+                );
+            }
+
+            await KardexMovimiento.create({
+                id_lote,
+                tipo_movimiento: 'ANULACION',
+                cantidad: unidades_base,
+                id_ubicacion_origen: null,
+                id_ubicacion_destino: id_ubicacion,
+                id_usuario,
+                observacion: `Anulación de Venta ${venta.numero_comprobante}`,
+            }, { transaction: t });
+        }
+    });
+
+    // Descontar puntos de lealtad
+    try {
+        const cliente = venta.cliente;
+        if (cliente && cliente.ci !== '000000') {
+            const totalVenta = parseFloat(venta.total);
+            const puntosADescontar = Math.floor(totalVenta / 50);
+
+            if (puntosADescontar > 0) {
+                const puntosActuales = parseInt(cliente.puntos || 0);
+                const nuevosPuntos = Math.max(0, puntosActuales - puntosADescontar);
+                await Cliente.update({ puntos: nuevosPuntos }, { where: { id: cliente.id } });
+            }
+        }
+    } catch (e) {
+        console.error('Error descontando puntos de lealtad al anular:', e.message);
+    }
+
+    return getVentaById(id_venta);
+};
+
 export const getVentaById = async (id) => {
     const venta = await Venta.findByPk(id, {
         include: [
@@ -414,13 +534,14 @@ export const findAllVentas = async (query, userContext = {}) => {
 export const getResumenVentasSesion = async (id_sesion_caja) => {
     const ventas = await Venta.findAll({
         where: { id_sesion_caja },
-        attributes: ['metodo_pago', 'total', 'monto_descuento_global'],
+        attributes: ['metodo_pago', 'total', 'monto_descuento_global', 'esta_activo'],
     });
 
     const resumen = {
-        cantidad_ventas: ventas.length,
+        cantidad_ventas: 0,
         total_efectivo: 0, total_qr: 0, total_tarjeta: 0,
         total_descuentos: 0, gran_total: 0,
+        cantidad_anuladas: 0,
         // Devoluciones y cambios
         cantidad_devoluciones: 0,
         cantidad_cambios: 0,
@@ -429,6 +550,11 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
     };
 
     ventas.forEach((v) => {
+        if (!v.esta_activo) {
+            resumen.cantidad_anuladas++;
+            return; // No sumar al total
+        }
+        resumen.cantidad_ventas++;
         const total = parseFloat(v.total);
         resumen.gran_total += total;
         resumen.total_descuentos += parseFloat(v.monto_descuento_global || 0);

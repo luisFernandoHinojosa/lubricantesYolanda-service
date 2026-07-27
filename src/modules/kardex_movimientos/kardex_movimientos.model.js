@@ -23,7 +23,7 @@ export default (sequelize) => {
             allowNull: false,
         },
         tipo_movimiento: {
-            type: DataTypes.ENUM('INGRESO', 'VENTA', 'TRASLADO', 'AJUSTE', 'DEVOLUCION'),
+            type: DataTypes.ENUM('INGRESO', 'VENTA', 'TRASLADO', 'AJUSTE', 'DEVOLUCION', 'ANULACION'),
             allowNull: false,
         },
         cantidad: {
