@@ -490,41 +490,52 @@ export const findAllVentas = async (query, userContext = {}) => {
 
     if (query.desde || query.hasta) {
         where.createdAt = {};
-        if (query.desde) where.createdAt[Op.gte] = new Date(query.desde);
-        if (query.hasta) where.createdAt[Op.lte] = new Date(query.hasta);
+        if (query.desde) {
+            // Asegurarnos de usar formato cadena para delegar a la DB y evitar problemas de timezone de NodeJS
+            const desdeStr = (query.desde.includes('T') ? query.desde.split('T')[0] : query.desde).trim();
+            where.createdAt[Op.gte] = `${desdeStr} 00:00:00`;
+        }
+        if (query.hasta) {
+            const hastaStr = (query.hasta.includes('T') ? query.hasta.split('T')[0] : query.hasta).trim();
+            where.createdAt[Op.lte] = `${hastaStr} 23:59:59.999`;
+        }
     }
 
-    const { rows: ventas, count: total } = await Venta.findAndCountAll({
-        where,
-        limit,
-        offset,
-        order: order || [['createdAt', 'DESC']],
-        subQuery: false,
-        distinct: true,
-        exclude: ['notas', 'id_sucursal', 'id_empleado', 'id_cliente'],
-        include: [
-            {
-                model: Cliente,
-                as: 'cliente',
-                attributes: ['id', 'nombre', 'apellido_paterno', 'ci']
-            },
-            {
-                model: Sucursal,
-                as: 'sucursal',
-                attributes: ['id', 'nombre']
-            },
-            {
-                model: Empleado,
-                as: 'cajero',
-                attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
-            }
+    const [{ rows: ventas, count: total }, totalMonto] = await Promise.all([
+        Venta.findAndCountAll({
+            where,
+            limit,
+            offset,
+            order: order || [['createdAt', 'DESC']],
+            subQuery: false,
+            distinct: true,
+            exclude: ['notas', 'id_sucursal', 'id_empleado', 'id_cliente'],
+            include: [
+                {
+                    model: Cliente,
+                    as: 'cliente',
+                    attributes: ['id', 'nombre', 'apellido_paterno', 'ci']
+                },
+                {
+                    model: Sucursal,
+                    as: 'sucursal',
+                    attributes: ['id', 'nombre']
+                },
+                {
+                    model: Empleado,
+                    as: 'cajero',
+                    attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
+                }
 
-        ]
-    });
+            ]
+        }),
+        Venta.sum('total', { where })
+    ]);
 
     return {
         ventas,
         total,
+        totalMontoVentas: totalMonto || 0,
         page,
         perPage,
         totalPages: Math.ceil(total / perPage)
