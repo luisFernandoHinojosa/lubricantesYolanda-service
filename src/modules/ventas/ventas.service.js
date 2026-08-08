@@ -20,6 +20,7 @@ const {
     Usuario,
     UnidadMedida,
     Sucursal,
+    Devolucion,
 } = db;
 
 const generarNumeroComprobante = async (id_sucursal, transaction) => {
@@ -491,7 +492,6 @@ export const findAllVentas = async (query, userContext = {}) => {
     if (query.desde || query.hasta) {
         where.createdAt = {};
         if (query.desde) {
-            // Asegurarnos de usar formato cadena para delegar a la DB y evitar problemas de timezone de NodeJS
             const desdeStr = (query.desde.includes('T') ? query.desde.split('T')[0] : query.desde).trim();
             where.createdAt[Op.gte] = `${desdeStr} 00:00:00`;
         }
@@ -501,7 +501,31 @@ export const findAllVentas = async (query, userContext = {}) => {
         }
     }
 
-    const [{ rows: ventas, count: total }, totalMonto] = await Promise.all([
+    const includes = [
+        {
+            model: Cliente,
+            as: 'cliente',
+            attributes: ['id', 'nombre', 'apellido_paterno', 'ci']
+        },
+        {
+            model: Sucursal,
+            as: 'sucursal',
+            attributes: ['id', 'nombre']
+        },
+        {
+            model: Empleado,
+            as: 'cajero',
+            attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
+        },
+        {
+            model: Devolucion,
+            as: 'devoluciones',
+            where: { estado: 'COMPLETADA', esta_activo: true },
+            required: false
+        }
+    ];
+
+    const [{ rows: ventasList, count: total }, allVentasForSum] = await Promise.all([
         Venta.findAndCountAll({
             where,
             limit,
@@ -510,32 +534,83 @@ export const findAllVentas = async (query, userContext = {}) => {
             subQuery: false,
             distinct: true,
             exclude: ['notas', 'id_sucursal', 'id_empleado', 'id_cliente'],
-            include: [
-                {
-                    model: Cliente,
-                    as: 'cliente',
-                    attributes: ['id', 'nombre', 'apellido_paterno', 'ci']
-                },
-                {
-                    model: Sucursal,
-                    as: 'sucursal',
-                    attributes: ['id', 'nombre']
-                },
-                {
-                    model: Empleado,
-                    as: 'cajero',
-                    attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
-                }
-
-            ]
+            include: includes
         }),
-        Venta.sum('total', { where })
+        Venta.findAll({
+            where,
+            attributes: ['id', 'total', 'esta_activo'],
+            include: [
+                ...includes.filter(i => i.as !== 'devoluciones').map(inc => ({ ...inc, attributes: [] })),
+                {
+                    model: Devolucion,
+                    as: 'devoluciones',
+                    where: { estado: 'COMPLETADA', esta_activo: true },
+                    required: false,
+                    attributes: ['tipo', 'monto_devuelto', 'monto_diferencia']
+                }
+            ]
+        })
     ]);
+
+    let totalMontoVentas = 0;
+    allVentasForSum.forEach(v => {
+        if (!v.esta_activo) return; // Si está anulada, el neto es 0
+        
+        let net = parseFloat(v.total);
+        if (v.devoluciones) {
+            v.devoluciones.forEach(dev => {
+                if (dev.tipo === 'DEVOLUCION') net -= parseFloat(dev.monto_devuelto);
+                else if (dev.tipo === 'CAMBIO') net += parseFloat(dev.monto_diferencia);
+            });
+        }
+        totalMontoVentas += net;
+    });
+
+    const ventas = ventasList.map(v => {
+        const isCancelled = !v.esta_activo;
+        const status = isCancelled ? 'CANCELLED' : 'COMPLETED';
+
+        let net = parseFloat(v.total);
+        let retAmt = 0;
+        let exchDiff = 0;
+
+        if (!isCancelled && v.devoluciones) {
+            v.devoluciones.forEach(dev => {
+                if (dev.tipo === 'DEVOLUCION') {
+                    retAmt += parseFloat(dev.monto_devuelto);
+                    net -= parseFloat(dev.monto_devuelto);
+                } else if (dev.tipo === 'CAMBIO') {
+                    exchDiff += parseFloat(dev.monto_diferencia);
+                    net += parseFloat(dev.monto_diferencia);
+                }
+            });
+        }
+
+        return {
+            id: v.id,
+            numero_comprobante: v.numero_comprobante,
+            id_sesion_caja: v.id_sesion_caja,
+            subtotal: v.subtotal,
+            tipo_descuento_global: v.tipo_descuento_global,
+            valor_descuento_global: v.valor_descuento_global,
+            monto_descuento_global: v.monto_descuento_global,
+            total: net.toFixed(2), // Siempre devuelve el total calculado, incluso si está anulado
+            metodo_pago: v.metodo_pago,
+            monto_pagado: v.monto_pagado,
+            cambio_entregado: v.cambio_entregado,
+            createdAt: v.createdAt,
+            updatedAt: v.updatedAt,
+            cliente: v.cliente,
+            cajero: v.cajero,
+            sucursal: v.sucursal,
+            esta_activo: v.esta_activo
+        };
+    });
 
     return {
         ventas,
         total,
-        totalMontoVentas: totalMonto || 0,
+        totalMontoVentas,
         page,
         perPage,
         totalPages: Math.ceil(total / perPage)

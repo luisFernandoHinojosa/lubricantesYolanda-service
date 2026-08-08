@@ -69,14 +69,14 @@ export const getReporteVentas = async (query = {}) => {
         const sub = parseFloat(s.subtotal) || 0;
         const disc = parseFloat(s.descuento) || 0;
         const tot = parseFloat(s.total) || 0;
-        
+
         totalReceipts += count;
-        
+
         if (s.esta_activo) {
             activeSubtotal += sub;
             activeDiscount += disc;
             activeTotal += tot;
-            
+
             if (!paymentMethods[s.metodo_pago]) {
                 paymentMethods[s.metodo_pago] = { total: 0, cantidad: 0 };
             }
@@ -121,8 +121,8 @@ export const getReporteVentas = async (query = {}) => {
         include: [
             { model: Cliente, as: 'cliente', attributes: ['id', 'nombre', 'apellido_paterno'] },
             { model: Empleado, as: 'cajero', attributes: ['id', 'nombre', 'apellido_paterno'] },
-            { 
-                model: DetalleVenta, 
+            {
+                model: DetalleVenta,
                 as: 'detalles',
                 include: [{ model: Producto, as: 'producto', attributes: ['id', 'codigo_barras', 'nombre_comercial'] }]
             },
@@ -132,8 +132,8 @@ export const getReporteVentas = async (query = {}) => {
                 where: { estado: 'COMPLETADA', esta_activo: true },
                 required: false,
                 include: [
-                    { 
-                        model: DetalleDevolucion, 
+                    {
+                        model: DetalleDevolucion,
                         as: 'detalles',
                         include: [
                             { model: Producto, as: 'producto_original', attributes: ['id', 'codigo_barras', 'nombre_comercial'] },
@@ -148,13 +148,13 @@ export const getReporteVentas = async (query = {}) => {
     const receipts = ventas.map(v => {
         const isCancelled = !v.esta_activo;
         const status = isCancelled ? 'CANCELLED' : 'COMPLETED';
-        
+
         let net = parseFloat(v.total);
         let retAmt = 0;
         let exchDiff = 0;
-        
+
         const items = [];
-        
+
         // Original items
         v.detalles.forEach(d => {
             items.push({
@@ -169,13 +169,13 @@ export const getReporteVentas = async (query = {}) => {
                 referenceReceipt: null
             });
         });
-        
+
         if (!isCancelled) {
             v.devoluciones.forEach(dev => {
                 if (dev.tipo === 'DEVOLUCION') {
                     retAmt += parseFloat(dev.monto_devuelto);
                     net -= parseFloat(dev.monto_devuelto);
-                    
+
                     dev.detalles.forEach(dd => {
                         items.push({
                             id: dd.id + '-ret',
@@ -192,7 +192,7 @@ export const getReporteVentas = async (query = {}) => {
                 } else if (dev.tipo === 'CAMBIO') {
                     exchDiff += parseFloat(dev.monto_diferencia);
                     net += parseFloat(dev.monto_diferencia);
-                    
+
                     dev.detalles.forEach(dd => {
                         // Returned product part of the exchange
                         items.push({
@@ -206,7 +206,7 @@ export const getReporteVentas = async (query = {}) => {
                             movement: 'RETURN',
                             referenceReceipt: dev.numero_devolucion
                         });
-                        
+
                         // New product part of the exchange
                         if (dd.id_producto_nuevo) {
                             items.push({
@@ -225,7 +225,7 @@ export const getReporteVentas = async (query = {}) => {
                 }
             });
         }
-        
+
         return {
             id: v.id,
             number: v.numero_comprobante,
@@ -245,7 +245,7 @@ export const getReporteVentas = async (query = {}) => {
             returnedAmount: retAmt,
             exchangeDifference: exchDiff,
             netTotal: isCancelled ? 0 : net,
-            items: isCancelled ? [] : items
+            items: items
         };
     });
 
