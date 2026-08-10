@@ -16,7 +16,7 @@ const {
 export const getReporteVentas = async (query = {}) => {
     const { desde, hasta, id_sucursal, id_empleado, metodo_pago } = query;
     const page = parseInt(query.page, 10) || 1;
-    const perPage = parseInt(query.limit, 10) || 15;
+    const perPage = parseInt(query.limit || query.perPage, 10) || 15;
     const offset = (page - 1) * perPage;
 
     const { start, end } = parseDateRange(desde, hasta);
@@ -118,6 +118,7 @@ export const getReporteVentas = async (query = {}) => {
         limit: perPage,
         offset,
         order: [['createdAt', 'DESC']],
+        distinct: true,
         include: [
             { model: Cliente, as: 'cliente', attributes: ['id', 'nombre', 'apellido_paterno'] },
             { model: Empleado, as: 'cajero', attributes: ['id', 'nombre', 'apellido_paterno'] },
