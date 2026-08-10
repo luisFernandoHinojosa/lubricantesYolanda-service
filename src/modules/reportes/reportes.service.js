@@ -43,7 +43,7 @@ export const getReporteVentas = async (query = {}) => {
 
     const devoluciones = await Devolucion.findAll({
         where: { createdAt: { [Op.between]: [start, end] }, estado: 'COMPLETADA', esta_activo: true },
-        include: [{ model: Venta, as: 'venta_original', where, attributes: [] }],
+        include: [{ model: Venta, as: 'venta_original', where: { ...where, esta_activo: true }, attributes: [] }],
         attributes: [
             'tipo',
             [fn('SUM', col('monto_devuelto')), 'total_devuelto'],
@@ -153,30 +153,36 @@ export const getReporteVentas = async (query = {}) => {
         let retAmt = 0;
         let exchDiff = 0;
 
-        const items = [];
+        let items = v.detalles.map(d => ({
+            id: d.id,
+            id_original: d.id,
+            productId: d.producto?.id,
+            code: d.producto?.codigo_barras,
+            name: d.producto?.nombre_comercial,
+            quantity: parseFloat(d.cantidad),
+            unitPrice: parseFloat(d.precio_unitario),
+            total: parseFloat(d.subtotal),
+            movement: 'SALE',
+            referenceReceipt: null
+        }));
 
-        // Original items
-        v.detalles.forEach(d => {
-            items.push({
-                id: d.id,
-                productId: d.producto?.id,
-                code: d.producto?.codigo_barras,
-                name: d.producto?.nombre_comercial,
-                quantity: parseFloat(d.cantidad),
-                unitPrice: parseFloat(d.precio_unitario),
-                total: parseFloat(d.subtotal),
-                movement: 'SALE',
-                referenceReceipt: null
-            });
-        });
-
-        if (!isCancelled) {
+        if (v.devoluciones) {
             v.devoluciones.forEach(dev => {
                 if (dev.tipo === 'DEVOLUCION') {
                     retAmt += parseFloat(dev.monto_devuelto);
-                    net -= parseFloat(dev.monto_devuelto);
+                    if (!isCancelled) net -= parseFloat(dev.monto_devuelto);
 
                     dev.detalles.forEach(dd => {
+                        // Restar del original
+                        const origIndex = items.findIndex(i => i.id_original === dd.id_detalle_venta && i.movement === 'SALE');
+                        if (origIndex !== -1) {
+                            items[origIndex].quantity -= parseFloat(dd.cantidad_devuelta);
+                            items[origIndex].total -= parseFloat(dd.subtotal_devuelto);
+                            if (items[origIndex].quantity <= 0) {
+                                items.splice(origIndex, 1);
+                            }
+                        }
+
                         items.push({
                             id: dd.id + '-ret',
                             productId: dd.producto_original?.id,
@@ -191,9 +197,19 @@ export const getReporteVentas = async (query = {}) => {
                     });
                 } else if (dev.tipo === 'CAMBIO') {
                     exchDiff += parseFloat(dev.monto_diferencia);
-                    net += parseFloat(dev.monto_diferencia);
+                    if (!isCancelled) net += parseFloat(dev.monto_diferencia);
 
                     dev.detalles.forEach(dd => {
+                        // Restar del original
+                        const origIndex = items.findIndex(i => i.id_original === dd.id_detalle_venta && i.movement === 'SALE');
+                        if (origIndex !== -1) {
+                            items[origIndex].quantity -= parseFloat(dd.cantidad_devuelta);
+                            items[origIndex].total -= parseFloat(dd.subtotal_devuelto);
+                            if (items[origIndex].quantity <= 0) {
+                                items.splice(origIndex, 1);
+                            }
+                        }
+
                         // Returned product part of the exchange
                         items.push({
                             id: dd.id + '-ret',
