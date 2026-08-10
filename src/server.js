@@ -5,7 +5,7 @@ import db from './database/index.js';
 import logger from './config/logger.js';
 import redisClient from './config/redis.js';
 import { cache } from './services/cache.service.js';
-import { runSeeders } from './database/seeders/index.js';
+// import { runSeeders } from './database/seeders/index.js';
 
 const startServer = async () => {
   try {
