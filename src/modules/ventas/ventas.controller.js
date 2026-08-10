@@ -53,6 +53,7 @@ export const listarVentas = asyncHandler(async (req, res, next) => {
         const {
             id_sesion_caja,
             id_usuario,
+            id_empleado,
             id_cliente,
             metodo_pago,
             desde,
@@ -69,6 +70,7 @@ export const listarVentas = asyncHandler(async (req, res, next) => {
             id_sucursal,
             id_sesion_caja,
             id_usuario,
+            id_empleado,
             id_cliente,
             metodo_pago,
             desde,

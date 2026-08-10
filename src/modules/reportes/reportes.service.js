@@ -9,171 +9,274 @@ const {
     Venta, DetalleVenta, Compra, DetalleCompra, Movimiento, CategoriaMovimiento,
     Producto, Presentacion, Lote, StockDistribucion, KardexMovimiento,
     SesionCaja, Cliente, Empleado, Sucursal, Ubicacion, Categoria,
-    Devolucion,
+    Devolucion, DetalleDevolucion,
     sequelize
 } = db;
 
 export const getReporteVentas = async (query = {}) => {
-    const { desde, hasta, id_sucursal, id_empleado, metodo_pago, agrupar_por = 'dia' } = query;
+    const { desde, hasta, id_sucursal, id_empleado, metodo_pago } = query;
+    const page = parseInt(query.page, 10) || 1;
+    const perPage = parseInt(query.limit, 10) || 15;
+    const offset = (page - 1) * perPage;
+
     const { start, end } = parseDateRange(desde, hasta);
 
-    const where = { 
-        createdAt: { [Op.between]: [start, end] },
-        esta_activo: true // <-- SOLUCION: Excluir ventas anuladas
-    };
+    const where = { createdAt: { [Op.between]: [start, end] } };
     if (id_sucursal) where.id_sucursal = id_sucursal;
     if (id_empleado) where.id_empleado = id_empleado;
     if (metodo_pago) where.metodo_pago = metodo_pago;
 
-    const stats = await Venta.findOne({
+    // 1. Get Summary Stats
+    const stats = await Venta.findAll({
         where,
         attributes: [
-            [fn('SUM', col('Venta.total')), 'total_ventas'],
-            [fn('COUNT', col('Venta.id')), 'cantidad_ventas'],
-            [fn('AVG', col('Venta.total')), 'ticket_promedio'],
-            [fn('SUM', col('Venta.monto_descuento_global')), 'total_descuentos'],
-            [fn('MAX', col('Venta.total')), 'venta_maxima'],
-            [fn('MIN', col('Venta.total')), 'venta_minima'],
+            'esta_activo',
+            'metodo_pago',
+            [fn('SUM', col('subtotal')), 'subtotal'],
+            [fn('SUM', col('monto_descuento_global')), 'descuento'],
+            [fn('SUM', col('total')), 'total'],
+            [fn('COUNT', col('id')), 'cantidad'],
         ],
+        group: ['esta_activo', 'metodo_pago'],
         raw: true,
     });
 
     const devoluciones = await Devolucion.findAll({
-        where: { 
-            createdAt: { [Op.between]: [start, end] },
-            estado: 'COMPLETADA',
-            esta_activo: true 
-        },
+        where: { createdAt: { [Op.between]: [start, end] }, estado: 'COMPLETADA', esta_activo: true },
+        include: [{ model: Venta, as: 'venta_original', where: { ...where, esta_activo: true }, attributes: [] }],
         attributes: [
             'tipo',
             [fn('SUM', col('monto_devuelto')), 'total_devuelto'],
             [fn('SUM', col('monto_diferencia')), 'total_diferencia']
         ],
         group: ['tipo'],
-        raw: true
+        raw: true,
     });
 
-    let totalDevoluciones = 0;
-    let totalDiferenciasCambios = 0;
+    const productsCount = await DetalleVenta.sum('cantidad', {
+        include: [{ model: Venta, as: 'venta', where: { ...where, esta_activo: true }, attributes: [] }]
+    });
 
-    devoluciones.forEach(d => {
-        if (d.tipo === 'DEVOLUCION') {
-            totalDevoluciones += parseFloat(d.total_devuelto || 0);
-        } else if (d.tipo === 'CAMBIO') {
-            totalDiferenciasCambios += parseFloat(d.total_diferencia || 0);
+    let totalReceipts = 0;
+    let activeSubtotal = 0;
+    let activeDiscount = 0;
+    let activeTotal = 0;
+    let cancelledAmount = 0;
+    const paymentMethods = {};
+
+    stats.forEach(s => {
+        const count = parseInt(s.cantidad) || 0;
+        const sub = parseFloat(s.subtotal) || 0;
+        const disc = parseFloat(s.descuento) || 0;
+        const tot = parseFloat(s.total) || 0;
+
+        totalReceipts += count;
+
+        if (s.esta_activo) {
+            activeSubtotal += sub;
+            activeDiscount += disc;
+            activeTotal += tot;
+
+            if (!paymentMethods[s.metodo_pago]) {
+                paymentMethods[s.metodo_pago] = { total: 0, cantidad: 0 };
+            }
+            paymentMethods[s.metodo_pago].total += tot;
+            paymentMethods[s.metodo_pago].cantidad += count;
+        } else {
+            cancelledAmount += tot;
         }
     });
 
-    const ventasBrutas = parseFloat(stats.total_ventas || 0);
-    // Para devoluciones netas restamos lo devuelto; para cambios sumamos la diferencia (puede ser + o -)
-    const ventasNetas = ventasBrutas - totalDevoluciones + totalDiferenciasCambios;
+    let returnedAmount = 0;
+    let exchangeDifference = 0;
 
-    const resumen = {
-        total_ventas: formatCurrency(ventasNetas),
-        ventas_brutas: formatCurrency(ventasBrutas),
-        ventas_netas: formatCurrency(ventasNetas),
-        total_devoluciones: formatCurrency(totalDevoluciones),
-        cantidad_ventas: parseInt(stats.cantidad_ventas) || 0,
-        ticket_promedio: formatCurrency(stats.ticket_promedio),
-        total_descuentos: formatCurrency(stats.total_descuentos),
-        venta_maxima: formatCurrency(stats.venta_maxima),
-        venta_minima: formatCurrency(stats.venta_minima),
-    };
-
-    const porMetodoPago = await Venta.findAll({
-        where,
-        attributes: [
-            'metodo_pago',
-            [fn('SUM', col('Venta.total')), 'total'],
-            [fn('COUNT', col('Venta.id')), 'cantidad'],
-        ],
-        group: ['metodo_pago'],
-        raw: true,
+    devoluciones.forEach(d => {
+        if (d.tipo === 'DEVOLUCION') {
+            returnedAmount += parseFloat(d.total_devuelto || 0);
+        } else if (d.tipo === 'CAMBIO') {
+            exchangeDifference += parseFloat(d.total_diferencia || 0);
+        }
     });
 
-    const por_metodo_pago = {};
-    porMetodoPago.forEach(r => {
-        por_metodo_pago[r.metodo_pago] = {
-            total: formatCurrency(r.total),
-            cantidad: parseInt(r.cantidad),
-            porcentaje: porcentaje(parseFloat(r.total), resumen.total_ventas),
+    const netTotal = activeTotal - returnedAmount + exchangeDifference;
+
+    const summary = {
+        receipts: totalReceipts,
+        products: productsCount || 0,
+        subtotal: parseFloat(activeSubtotal.toFixed(2)),
+        discount: parseFloat(activeDiscount.toFixed(2)),
+        returnedAmount: parseFloat(returnedAmount.toFixed(2)),
+        exchangeDifference: parseFloat(exchangeDifference.toFixed(2)),
+        cancelledAmount: parseFloat(cancelledAmount.toFixed(2)),
+        netTotal: parseFloat(netTotal.toFixed(2)),
+        paymentMethods
+    };
+
+    // 2. Fetch paginated receipts
+    const { count, rows: ventas } = await Venta.findAndCountAll({
+        where,
+        limit: perPage,
+        offset,
+        order: [['createdAt', 'DESC']],
+        include: [
+            { model: Cliente, as: 'cliente', attributes: ['id', 'nombre', 'apellido_paterno'] },
+            { model: Empleado, as: 'cajero', attributes: ['id', 'nombre', 'apellido_paterno'] },
+            {
+                model: DetalleVenta,
+                as: 'detalles',
+                include: [{ model: Producto, as: 'producto', attributes: ['id', 'codigo_barras', 'nombre_comercial'] }]
+            },
+            {
+                model: Devolucion,
+                as: 'devoluciones',
+                where: { estado: 'COMPLETADA', esta_activo: true },
+                required: false,
+                include: [
+                    {
+                        model: DetalleDevolucion,
+                        as: 'detalles',
+                        include: [
+                            { model: Producto, as: 'producto_original', attributes: ['id', 'codigo_barras', 'nombre_comercial'] },
+                            { model: Producto, as: 'producto_nuevo', attributes: ['id', 'codigo_barras', 'nombre_comercial'] }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    const receipts = ventas.map(v => {
+        const isCancelled = !v.esta_activo;
+        const status = isCancelled ? 'CANCELLED' : 'COMPLETED';
+
+        let net = parseFloat(v.total);
+        let retAmt = 0;
+        let exchDiff = 0;
+
+        let items = v.detalles.map(d => ({
+            id: d.id,
+            id_original: d.id,
+            productId: d.producto?.id,
+            code: d.producto?.codigo_barras,
+            name: d.producto?.nombre_comercial,
+            quantity: parseFloat(d.cantidad),
+            unitPrice: parseFloat(d.precio_unitario),
+            total: parseFloat(d.subtotal),
+            movement: 'SALE',
+            referenceReceipt: null
+        }));
+
+        if (v.devoluciones) {
+            v.devoluciones.forEach(dev => {
+                if (dev.tipo === 'DEVOLUCION') {
+                    retAmt += parseFloat(dev.monto_devuelto);
+                    if (!isCancelled) net -= parseFloat(dev.monto_devuelto);
+
+                    dev.detalles.forEach(dd => {
+                        // Restar del original
+                        const origIndex = items.findIndex(i => i.id_original === dd.id_detalle_venta && i.movement === 'SALE');
+                        if (origIndex !== -1) {
+                            items[origIndex].quantity -= parseFloat(dd.cantidad_devuelta);
+                            items[origIndex].total -= parseFloat(dd.subtotal_devuelto);
+                            if (items[origIndex].quantity <= 0) {
+                                items.splice(origIndex, 1);
+                            }
+                        }
+
+                        items.push({
+                            id: dd.id + '-ret',
+                            productId: dd.producto_original?.id,
+                            code: dd.producto_original?.codigo_barras,
+                            name: dd.producto_original?.nombre_comercial,
+                            quantity: parseFloat(dd.cantidad_devuelta),
+                            unitPrice: parseFloat(dd.precio_original),
+                            total: -parseFloat(dd.subtotal_devuelto),
+                            movement: 'RETURN',
+                            referenceReceipt: dev.numero_devolucion
+                        });
+                    });
+                } else if (dev.tipo === 'CAMBIO') {
+                    exchDiff += parseFloat(dev.monto_diferencia);
+                    if (!isCancelled) net += parseFloat(dev.monto_diferencia);
+
+                    dev.detalles.forEach(dd => {
+                        // Restar del original
+                        const origIndex = items.findIndex(i => i.id_original === dd.id_detalle_venta && i.movement === 'SALE');
+                        if (origIndex !== -1) {
+                            items[origIndex].quantity -= parseFloat(dd.cantidad_devuelta);
+                            items[origIndex].total -= parseFloat(dd.subtotal_devuelto);
+                            if (items[origIndex].quantity <= 0) {
+                                items.splice(origIndex, 1);
+                            }
+                        }
+
+                        // Returned product part of the exchange
+                        items.push({
+                            id: dd.id + '-ret',
+                            productId: dd.producto_original?.id,
+                            code: dd.producto_original?.codigo_barras,
+                            name: dd.producto_original?.nombre_comercial,
+                            quantity: parseFloat(dd.cantidad_devuelta),
+                            unitPrice: parseFloat(dd.precio_original),
+                            total: -parseFloat(dd.subtotal_devuelto),
+                            movement: 'RETURN',
+                            referenceReceipt: dev.numero_devolucion
+                        });
+
+                        // New product part of the exchange
+                        if (dd.id_producto_nuevo) {
+                            items.push({
+                                id: dd.id + '-new',
+                                productId: dd.producto_nuevo?.id,
+                                code: dd.producto_nuevo?.codigo_barras,
+                                name: dd.producto_nuevo?.nombre_comercial,
+                                quantity: parseFloat(dd.cantidad_nueva),
+                                unitPrice: parseFloat(dd.precio_nuevo),
+                                total: parseFloat(dd.subtotal_nuevo),
+                                movement: 'EXCHANGE_IN',
+                                referenceReceipt: dev.numero_devolucion
+                            });
+                        }
+                    });
+                }
+            });
+        }
+
+        return {
+            id: v.id,
+            number: v.numero_comprobante,
+            date: v.createdAt,
+            status,
+            paymentMethod: v.metodo_pago,
+            customer: v.cliente ? {
+                id: v.cliente.id,
+                name: `${v.cliente.nombre} ${v.cliente.apellido_paterno || ''}`.trim()
+            } : null,
+            seller: v.cajero ? {
+                id: v.cajero.id,
+                name: `${v.cajero.nombre} ${v.cajero.apellido_paterno || ''}`.trim()
+            } : null,
+            subtotal: parseFloat(v.subtotal),
+            discount: parseFloat(v.monto_descuento_global),
+            returnedAmount: retAmt,
+            exchangeDifference: exchDiff,
+            netTotal: isCancelled ? 0 : net,
+            items: items
         };
     });
 
-    const [fechaAttr, fechaAlias] = getGroupByExpression(agrupar_por, sequelize);
-    const serieRows = await Venta.findAll({
-        where,
-        attributes: [
-            [fechaAttr, fechaAlias],
-            [fn('SUM', col('Venta.total')), 'total'],
-            [fn('COUNT', col('Venta.id')), 'cantidad'],
-        ],
-        group: [literal(`"${fechaAlias}"`)],
-        order: [[literal(`"${fechaAlias}"`), 'ASC']],
-        raw: true,
-    });
+    const totalPages = Math.ceil(count / perPage);
 
-    const serie_temporal = serieRows.map(r => ({
-        fecha: r[fechaAlias] || r.fecha,
-        total: formatCurrency(r.total),
-        cantidad: parseInt(r.cantidad),
-    }));
-
-    const porSucursal = await Venta.findAll({
-        where,
-        attributes: [
-            'id_sucursal',
-            [fn('SUM', col('Venta.total')), 'total'],
-            [fn('COUNT', col('Venta.id')), 'cantidad'],
-        ],
-        include: [{ model: Sucursal, as: 'sucursal', attributes: ['nombre'] }],
-        group: ['id_sucursal', 'sucursal.id', 'sucursal.nombre'],
-        raw: true,
-    });
-
-    const por_sucursal = porSucursal.map(r => ({
-        id_sucursal: r.id_sucursal,
-        sucursal: r['sucursal.nombre'],
-        total: formatCurrency(r.total),
-        cantidad: parseInt(r.cantidad),
-    }));
-
-    const topCajeros = await Venta.findAll({
-        where,
-        attributes: [
-            'id_empleado',
-            [fn('SUM', col('Venta.total')), 'total'],
-            [fn('COUNT', col('Venta.id')), 'cantidad'],
-        ],
-        include: [{ model: Empleado, as: 'cajero', attributes: ['nombre', 'apellido_paterno'] }],
-        group: ['id_empleado', 'cajero.id', 'cajero.nombre', 'cajero.apellido_paterno'],
-        order: [[literal('total'), 'DESC']],
-        limit: 10,
-        raw: true,
-    });
-
-    const top_cajeros = topCajeros.map(r => ({
-        empleado: `${r['cajero.nombre']} ${r['cajero.apellido_paterno']}`,
-        total: formatCurrency(r.total),
-        cantidad: parseInt(r.cantidad),
-    }));
-
-    const { start: antStart, end: antEnd } = getPeriodoAnterior(start, end);
-    const whereAnterior = { ...where, createdAt: { [Op.between]: [antStart, antEnd] } };
-    const anterior = await Venta.findOne({
-        where: whereAnterior,
-        attributes: [[fn('SUM', col('Venta.total')), 'total']],
-        raw: true,
-    });
-
-    const comparativa_periodo_anterior = {
-        total_actual: resumen.total_ventas,
-        total_anterior: formatCurrency(anterior?.total),
-        variacion_porcentual: calcularVariacion(resumen.total_ventas, parseFloat(anterior?.total || 0)),
+    return {
+        summary,
+        receipts,
+        total: count,
+        page,
+        perPage,
+        totalPages
     };
-
-    return { resumen, por_metodo_pago, serie_temporal, por_sucursal, top_cajeros, comparativa_periodo_anterior };
 };
+
 
 export const getReporteCompras = async (query = {}) => {
     const { desde, hasta, id_sucursal, id_proveedor, estado_pago } = query;
