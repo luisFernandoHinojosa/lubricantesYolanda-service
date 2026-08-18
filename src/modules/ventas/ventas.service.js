@@ -20,6 +20,8 @@ const {
     Usuario,
     UnidadMedida,
     Sucursal,
+    Devolucion,
+    DetalleDevolucion,
 } = db;
 
 const generarNumeroComprobante = async (id_sucursal, transaction) => {
@@ -435,12 +437,22 @@ export const anularVenta = async (id_venta, id_usuario) => {
 };
 
 export const getVentaById = async (id) => {
-    const venta = await Venta.findByPk(id, {
+    const v = await Venta.findByPk(id, {
         include: [
             {
                 model: Cliente,
                 as: 'cliente',
                 attributes: ['id', 'nombre', 'ci', 'apellido_paterno', 'apellido_materno', 'telefono'],
+            },
+            {
+                model: Sucursal,
+                as: 'sucursal',
+                attributes: ['id', 'nombre']
+            },
+            {
+                model: Empleado,
+                as: 'cajero',
+                attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
             },
             {
                 model: DetalleVenta,
@@ -465,16 +477,162 @@ export const getVentaById = async (id) => {
                     },
                 ],
             },
+            {
+                model: Devolucion,
+                as: 'devoluciones',
+                where: { estado: 'COMPLETADA', esta_activo: true },
+                required: false,
+                include: [
+                    {
+                        model: DetalleDevolucion,
+                        as: 'detalles',
+                        include: [
+                            { 
+                                model: Producto, 
+                                as: 'producto_original', 
+                                attributes: ['id', 'nombre_comercial', 'codigo_barras'],
+                                include: [{ model: UnidadMedida, as: 'unidad_medida', attributes: ['id', 'nombre', 'abreviatura'] }]
+                            },
+                            { 
+                                model: Producto, 
+                                as: 'producto_nuevo', 
+                                attributes: ['id', 'nombre_comercial', 'codigo_barras'],
+                                include: [{ model: UnidadMedida, as: 'unidad_medida', attributes: ['id', 'nombre', 'abreviatura'] }]
+                            },
+                            { model: Presentacion, as: 'presentacion_original', attributes: ['id', 'nombre', 'factor_conversion'] },
+                            { model: Presentacion, as: 'presentacion_nueva', attributes: ['id', 'nombre', 'factor_conversion'] }
+                        ]
+                    }
+                ]
+            }
         ],
     });
 
-    if (!venta) {
+    if (!v) {
         const err = new Error('Venta no encontrada.');
         err.statusCode = 404;
         throw err;
     }
 
-    return venta;
+    const isCancelled = !v.esta_activo;
+    
+    let net = parseFloat(v.total);
+    let retAmt = 0;
+    let exchDiff = 0;
+    
+    // Mapear los detalles originales de la venta
+    let detallesVenta = v.detalles.map(d => ({
+        id: d.id,
+        id_original: d.id,
+        producto: d.producto,
+        presentacion: d.presentacion,
+        cantidad: parseFloat(d.cantidad),
+        precio_unitario: parseFloat(d.precio_unitario),
+        subtotal: parseFloat(d.subtotal),
+        movimiento: 'VENTA',
+        numero_serie: null
+    }));
+
+    if (!isCancelled && v.devoluciones) {
+        v.devoluciones.forEach(dev => {
+            if (dev.tipo === 'DEVOLUCION') {
+                retAmt += parseFloat(dev.monto_devuelto);
+                net -= parseFloat(dev.monto_devuelto);
+                
+                dev.detalles.forEach(dd => {
+                    // Restar del original para no mostrar duplicados
+                    const origIndex = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
+                    if (origIndex !== -1) {
+                        detallesVenta[origIndex].cantidad -= parseFloat(dd.cantidad_devuelta);
+                        detallesVenta[origIndex].subtotal -= parseFloat(dd.subtotal_devuelto);
+                        if (detallesVenta[origIndex].cantidad <= 0) {
+                            detallesVenta.splice(origIndex, 1);
+                        }
+                    }
+                    
+                    detallesVenta.push({
+                        id: dd.id + '-ret',
+                        producto: dd.producto_original,
+                        presentacion: dd.presentacion_original,
+                        cantidad: parseFloat(dd.cantidad_devuelta),
+                        precio_unitario: parseFloat(dd.precio_original),
+                        subtotal: -parseFloat(dd.subtotal_devuelto),
+                        movimiento: 'DEVOLUCION',
+                        referencia_comprobante: dev.numero_devolucion
+                    });
+                });
+            } else if (dev.tipo === 'CAMBIO') {
+                exchDiff += parseFloat(dev.monto_diferencia);
+                net += parseFloat(dev.monto_diferencia);
+                
+                dev.detalles.forEach(dd => {
+                    // Restar del original para no mostrar duplicados
+                    const origIndex = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
+                    if (origIndex !== -1) {
+                        detallesVenta[origIndex].cantidad -= parseFloat(dd.cantidad_devuelta);
+                        detallesVenta[origIndex].subtotal -= parseFloat(dd.subtotal_devuelto);
+                        if (detallesVenta[origIndex].cantidad <= 0) {
+                            detallesVenta.splice(origIndex, 1);
+                        }
+                    }
+
+                    // Producto que entra (devuelto por el cliente)
+                    detallesVenta.push({
+                        id: dd.id + '-ret',
+                        producto: dd.producto_original,
+                        presentacion: dd.presentacion_original,
+                        cantidad: parseFloat(dd.cantidad_devuelta),
+                        precio_unitario: parseFloat(dd.precio_original),
+                        subtotal: -parseFloat(dd.subtotal_devuelto),
+                        movimiento: 'DEVOLUCION', // Marcado como DEVOLUCION porque el cliente lo devuelve
+                        referencia_comprobante: dev.numero_devolucion,
+                        notas: `Cambiado por: ${dd.producto_nuevo ? dd.producto_nuevo.nombre_comercial : 'Otro'}`
+                    });
+                    
+                    // Producto nuevo que se lleva el cliente
+                    if (dd.id_producto_nuevo) {
+                        detallesVenta.push({
+                            id: dd.id + '-new',
+                            producto: dd.producto_nuevo,
+                            presentacion: dd.presentacion_nueva,
+                            cantidad: parseFloat(dd.cantidad_nueva),
+                            precio_unitario: parseFloat(dd.precio_nuevo),
+                            subtotal: parseFloat(dd.subtotal_nuevo),
+                            movimiento: 'CAMBIO',
+                            referencia_comprobante: dev.numero_devolucion,
+                            notas: `Entregado a cambio de: ${dd.producto_original.nombre_comercial}`
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    return {
+        id: v.id,
+        numero_comprobante: v.numero_comprobante,
+        id_sesion_caja: v.id_sesion_caja,
+        subtotal: v.subtotal,
+        tipo_descuento_global: v.tipo_descuento_global,
+        valor_descuento_global: v.valor_descuento_global,
+        monto_descuento_global: v.monto_descuento_global,
+        total: net.toFixed(2), // Siempre mantener el total de la venta, incluso si fue anulada
+        metodo_pago: v.metodo_pago,
+        monto_pagado: v.monto_pagado,
+        cambio_entregado: v.cambio_entregado,
+        createdAt: v.createdAt,
+        updatedAt: v.updatedAt,
+        cliente: v.cliente,
+        cajero: v.cajero,
+        sucursal: v.sucursal,
+        esta_activo: v.esta_activo,
+        // Nuevos atributos de coherencia
+        monto_devuelto: retAmt.toFixed(2),
+        diferencia_cambio: exchDiff.toFixed(2),
+        total_neto: (isCancelled ? 0 : net).toFixed(2),
+        // Array de detalles enriquecido
+        detalles: detallesVenta
+    };
 };
 
 export const findAllVentas = async (query, userContext = {}) => {
@@ -491,7 +649,6 @@ export const findAllVentas = async (query, userContext = {}) => {
     if (query.desde || query.hasta) {
         where.createdAt = {};
         if (query.desde) {
-            // Asegurarnos de usar formato cadena para delegar a la DB y evitar problemas de timezone de NodeJS
             const desdeStr = (query.desde.includes('T') ? query.desde.split('T')[0] : query.desde).trim();
             where.createdAt[Op.gte] = `${desdeStr} 00:00:00`;
         }
@@ -501,7 +658,31 @@ export const findAllVentas = async (query, userContext = {}) => {
         }
     }
 
-    const [{ rows: ventas, count: total }, totalMonto] = await Promise.all([
+    const includes = [
+        {
+            model: Cliente,
+            as: 'cliente',
+            attributes: ['id', 'nombre', 'apellido_paterno', 'ci']
+        },
+        {
+            model: Sucursal,
+            as: 'sucursal',
+            attributes: ['id', 'nombre']
+        },
+        {
+            model: Empleado,
+            as: 'cajero',
+            attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
+        },
+        {
+            model: Devolucion,
+            as: 'devoluciones',
+            where: { estado: 'COMPLETADA', esta_activo: true },
+            required: false
+        }
+    ];
+
+    const [{ rows: ventasList, count: total }, allVentasForSum] = await Promise.all([
         Venta.findAndCountAll({
             where,
             limit,
@@ -510,32 +691,83 @@ export const findAllVentas = async (query, userContext = {}) => {
             subQuery: false,
             distinct: true,
             exclude: ['notas', 'id_sucursal', 'id_empleado', 'id_cliente'],
-            include: [
-                {
-                    model: Cliente,
-                    as: 'cliente',
-                    attributes: ['id', 'nombre', 'apellido_paterno', 'ci']
-                },
-                {
-                    model: Sucursal,
-                    as: 'sucursal',
-                    attributes: ['id', 'nombre']
-                },
-                {
-                    model: Empleado,
-                    as: 'cajero',
-                    attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
-                }
-
-            ]
+            include: includes
         }),
-        Venta.sum('total', { where })
+        Venta.findAll({
+            where,
+            attributes: ['id', 'total', 'esta_activo'],
+            include: [
+                ...includes.filter(i => i.as !== 'devoluciones').map(inc => ({ ...inc, attributes: [] })),
+                {
+                    model: Devolucion,
+                    as: 'devoluciones',
+                    where: { estado: 'COMPLETADA', esta_activo: true },
+                    required: false,
+                    attributes: ['tipo', 'monto_devuelto', 'monto_diferencia']
+                }
+            ]
+        })
     ]);
+
+    let totalMontoVentas = 0;
+    allVentasForSum.forEach(v => {
+        if (!v.esta_activo) return; // Si está anulada, el neto es 0
+        
+        let net = parseFloat(v.total);
+        if (v.devoluciones) {
+            v.devoluciones.forEach(dev => {
+                if (dev.tipo === 'DEVOLUCION') net -= parseFloat(dev.monto_devuelto);
+                else if (dev.tipo === 'CAMBIO') net += parseFloat(dev.monto_diferencia);
+            });
+        }
+        totalMontoVentas += net;
+    });
+
+    const ventas = ventasList.map(v => {
+        const isCancelled = !v.esta_activo;
+        const status = isCancelled ? 'CANCELLED' : 'COMPLETED';
+
+        let net = parseFloat(v.total);
+        let retAmt = 0;
+        let exchDiff = 0;
+
+        if (!isCancelled && v.devoluciones) {
+            v.devoluciones.forEach(dev => {
+                if (dev.tipo === 'DEVOLUCION') {
+                    retAmt += parseFloat(dev.monto_devuelto);
+                    net -= parseFloat(dev.monto_devuelto);
+                } else if (dev.tipo === 'CAMBIO') {
+                    exchDiff += parseFloat(dev.monto_diferencia);
+                    net += parseFloat(dev.monto_diferencia);
+                }
+            });
+        }
+
+        return {
+            id: v.id,
+            numero_comprobante: v.numero_comprobante,
+            id_sesion_caja: v.id_sesion_caja,
+            subtotal: v.subtotal,
+            tipo_descuento_global: v.tipo_descuento_global,
+            valor_descuento_global: v.valor_descuento_global,
+            monto_descuento_global: v.monto_descuento_global,
+            total: net.toFixed(2), // Siempre devuelve el total calculado, incluso si está anulado
+            metodo_pago: v.metodo_pago,
+            monto_pagado: v.monto_pagado,
+            cambio_entregado: v.cambio_entregado,
+            createdAt: v.createdAt,
+            updatedAt: v.updatedAt,
+            cliente: v.cliente,
+            cajero: v.cajero,
+            sucursal: v.sucursal,
+            esta_activo: v.esta_activo
+        };
+    });
 
     return {
         ventas,
         total,
-        totalMontoVentas: totalMonto || 0,
+        totalMontoVentas,
         page,
         perPage,
         totalPages: Math.ceil(total / perPage)
