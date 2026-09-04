@@ -42,7 +42,7 @@ router.route('/:id')
     .put(uploadSingle('foto'), sanitizeInput, checkProductoExists, validateUpdateProducto, productosController.update)
     .delete(checkProductoExists, productosController.remove);
 
-router.use(requireSesionAbierta);
+//router.use(requireSesionAbierta);
 router.get('/pos/buscar', validateQueryBusqueda, throttleBusqueda, buscarProductos);
 router.get('/pos/barcode/:codigo', validateBarcode, rateLimitBarcode, buscarPorBarcode);
 router.get('/pos/:id', getProducto);

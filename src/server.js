@@ -5,7 +5,7 @@ import db from './database/index.js';
 import logger from './config/logger.js';
 import redisClient from './config/redis.js';
 import { cache } from './services/cache.service.js';
-import { runSeeders } from './database/seeders/index.js';
+// import { runSeeders } from './database/seeders/index.js';
 
 const startServer = async () => {
   try {
@@ -13,8 +13,8 @@ const startServer = async () => {
     await db.sequelize.authenticate();
     // await db.sequelize.query('DROP SCHEMA IF EXISTS public CASCADE;');
     // await db.sequelize.query('CREATE SCHEMA public;');
-    await db.sequelize.sync({ force: true });
-    // await runSeeders();
+    await db.sequelize.sync(); // { force: true } { alter: true }
+    //await runSeeders();
     cache.setClient(redisClient);
     logger.info('CacheService conectado a Redis');
     console.log('Paso 6: Abriendo puerto del servidor...');
