@@ -502,15 +502,15 @@ export const getVentaById = async (id) => {
                         model: DetalleDevolucion,
                         as: 'detalles',
                         include: [
-                            { 
-                                model: Producto, 
-                                as: 'producto_original', 
+                            {
+                                model: Producto,
+                                as: 'producto_original',
                                 attributes: ['id', 'nombre_comercial', 'codigo_barras'],
                                 include: [{ model: UnidadMedida, as: 'unidad_medida', attributes: ['id', 'nombre', 'abreviatura'] }]
                             },
-                            { 
-                                model: Producto, 
-                                as: 'producto_nuevo', 
+                            {
+                                model: Producto,
+                                as: 'producto_nuevo',
                                 attributes: ['id', 'nombre_comercial', 'codigo_barras'],
                                 include: [{ model: UnidadMedida, as: 'unidad_medida', attributes: ['id', 'nombre', 'abreviatura'] }]
                             },
@@ -530,11 +530,11 @@ export const getVentaById = async (id) => {
     }
 
     const isCancelled = !v.esta_activo;
-    
+
     let net = parseFloat(v.total);
     let retAmt = 0;
     let exchDiff = 0;
-    
+
     // Mapear los detalles originales de la venta
     let detallesVenta = v.detalles.map(d => ({
         id: d.id,
@@ -553,7 +553,7 @@ export const getVentaById = async (id) => {
             if (dev.tipo === 'DEVOLUCION') {
                 retAmt += parseFloat(dev.monto_devuelto);
                 net -= parseFloat(dev.monto_devuelto);
-                
+
                 dev.detalles.forEach(dd => {
                     // Restar del original para no mostrar duplicados
                     const origIndex = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
@@ -564,7 +564,7 @@ export const getVentaById = async (id) => {
                             detallesVenta.splice(origIndex, 1);
                         }
                     }
-                    
+
                     detallesVenta.push({
                         id: dd.id + '-ret',
                         producto: dd.producto_original,
@@ -579,7 +579,7 @@ export const getVentaById = async (id) => {
             } else if (dev.tipo === 'CAMBIO') {
                 exchDiff += parseFloat(dev.monto_diferencia);
                 net += parseFloat(dev.monto_diferencia);
-                
+
                 dev.detalles.forEach(dd => {
                     // Restar del original para no mostrar duplicados
                     const origIndex = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
@@ -603,7 +603,7 @@ export const getVentaById = async (id) => {
                         referencia_comprobante: dev.numero_devolucion,
                         notas: `Cambiado por: ${dd.producto_nuevo ? dd.producto_nuevo.nombre_comercial : 'Otro'}`
                     });
-                    
+
                     // Producto nuevo que se lleva el cliente
                     if (dd.id_producto_nuevo) {
                         detallesVenta.push({
@@ -732,7 +732,7 @@ export const findAllVentas = async (query, userContext = {}) => {
     let totalMontoVentas = 0;
     allVentasForSum.forEach(v => {
         if (!v.esta_activo) return; // Si está anulada, el neto es 0
-        
+
         let net = parseFloat(v.total);
         if (v.devoluciones) {
             v.devoluciones.forEach(dev => {
@@ -826,11 +826,11 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
         const total = parseFloat(v.total);
         resumen.gran_total += total;
         resumen.total_descuentos += parseFloat(v.monto_descuento_global || 0);
-        
+
         let efectivo = 0;
         let qr = 0;
         let tarjeta = 0;
-        
+
         if (v.pagos) {
             v.pagos.forEach(p => {
                 const monto = parseFloat(p.monto);
@@ -839,7 +839,7 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
                 else if (p.metodo_pago === 'TARJETA') tarjeta += monto;
             });
         }
-        
+
         efectivo -= parseFloat(v.cambio_entregado || 0);
 
         resumen.total_efectivo += efectivo;

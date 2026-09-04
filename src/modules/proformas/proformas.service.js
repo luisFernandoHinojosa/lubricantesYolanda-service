@@ -1,7 +1,7 @@
 import { Op } from 'sequelize';
 import db from '../../database/index.js';
-import { PROFORMA_CONFIG } from '../../common/applyFilters.js';
-import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
+// import { PROFORMA_CONFIG } from '../../common/applyFilters.js';
+// import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
 import { crearVenta } from '../ventas/ventas.service.js';
 
 const {
@@ -208,7 +208,7 @@ export const getProformaById = async (id) => {
 
 export const findAllProformas = async (query, userContext = {}) => {
     const filters = { ...query, ...userContext };
-    
+
     // Si no existe PROFORMA_CONFIG, podemos construir el config dinámicamente
     // o simplemente hacer una búsqueda básica si buildSequelizeQuery falla.
     // Asumiremos que PROFORMA_CONFIG se creará, o podemos armar el where manual.
@@ -221,7 +221,7 @@ export const findAllProformas = async (query, userContext = {}) => {
         if (filters.desde) where.createdAt[Op.gte] = new Date(filters.desde);
         if (filters.hasta) where.createdAt[Op.lte] = new Date(filters.hasta);
     }
-    
+
     const limit = parseInt(filters.perPage) || 20;
     const offset = ((parseInt(filters.page) || 1) - 1) * limit;
 
@@ -256,7 +256,7 @@ export const findAllProformas = async (query, userContext = {}) => {
 
 export const actualizarProforma = async (id, data) => {
     const proforma = await getProformaById(id);
-    
+
     if (proforma.estado !== 'PENDIENTE') {
         const err = new Error('Solo se pueden actualizar proformas en estado PENDIENTE.');
         err.statusCode = 400;
@@ -275,7 +275,7 @@ export const facturarProforma = async (id, {
     id_sucursal, id_usuario, id_sesion_caja, pagos, monto_pagado, notas_adicionales
 }) => {
     const proforma = await getProformaById(id);
-    
+
     if (proforma.estado !== 'PENDIENTE') {
         const err = new Error(`La proforma ya no está pendiente. Estado actual: ${proforma.estado}`);
         err.statusCode = 400;
@@ -303,7 +303,7 @@ export const facturarProforma = async (id, {
     await sequelize.transaction(async (t) => {
         // Marcamos la proforma como facturada
         await Proforma.update({ estado: 'FACTURADA' }, { where: { id }, transaction: t });
-        
+
         // Llamamos al servicio de ventas
         // Pasamos t? crearVenta maneja su propia transacción internamente, lo ideal sería que reciba una t.
         // Pero como crearVenta usa su propia transacción y no la recibe por parámetro, la proforma podría quedar FACTURADA
