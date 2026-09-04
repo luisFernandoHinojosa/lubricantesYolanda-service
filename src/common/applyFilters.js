@@ -3,7 +3,6 @@ export const CLIENT_CONFIG = {
   filterableFields: ['tipo_cliente', 'status'],
   defaultSort: ['nombre', 'ASC']
 };
-
 export const COMPRA_CONFIG = {
   searchableFields: [
     '$proveedor.nombre$',
