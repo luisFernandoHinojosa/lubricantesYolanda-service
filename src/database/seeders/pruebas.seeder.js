@@ -14,7 +14,8 @@ export const seedPruebasVentas = async () => {
             Cliente,
             SesionCaja,
             Venta,
-            DetalleVenta
+            DetalleVenta,
+            PagoVenta
         } = db;
 
         // 1. Obtener dependencias base (ya deberían estar creadas por los otros seeders)
@@ -82,7 +83,6 @@ export const seedPruebasVentas = async () => {
                 id_cliente: cliente.id,
                 subtotal: 150.00,
                 total: 150.00,
-                metodo_pago: 'EFECTIVO',
                 monto_pagado: 150.00,
                 cambio_entregado: 0.00,
                 esta_activo: true,
@@ -97,6 +97,11 @@ export const seedPruebasVentas = async () => {
                 factor_aplicado: 1,
                 monto_descuento: 0,
             });
+            await PagoVenta.create({
+                id_venta: v1.id,
+                metodo_pago: 'EFECTIVO',
+                monto: 150.00,
+            });
 
             // Venta del 3ro de agosto (Mañana)
             const v2 = await Venta.create({
@@ -107,7 +112,6 @@ export const seedPruebasVentas = async () => {
                 id_cliente: cliente.id,
                 subtotal: 100.00,
                 total: 100.00,
-                metodo_pago: 'QR',
                 monto_pagado: 100.00,
                 cambio_entregado: 0.00,
                 esta_activo: true,
@@ -122,6 +126,11 @@ export const seedPruebasVentas = async () => {
                 factor_aplicado: 1,
                 monto_descuento: 0,
             });
+            await PagoVenta.create({
+                id_venta: v2.id,
+                metodo_pago: 'QR',
+                monto: 100.00,
+            });
 
             // Venta del 3ro de agosto (Tarde)
             const v3 = await Venta.create({
@@ -132,7 +141,6 @@ export const seedPruebasVentas = async () => {
                 id_cliente: cliente.id,
                 subtotal: 250.00,
                 total: 250.00,
-                metodo_pago: 'TARJETA',
                 monto_pagado: 250.00,
                 cambio_entregado: 0.00,
                 esta_activo: true,
@@ -146,6 +154,11 @@ export const seedPruebasVentas = async () => {
                 subtotal: 250.00,
                 factor_aplicado: 1,
                 monto_descuento: 0,
+            });
+            await PagoVenta.create({
+                id_venta: v3.id,
+                metodo_pago: 'TARJETA',
+                monto: 250.00,
             });
 
             console.log('[Seeders-Pruebas] ✓ Ventas y productos de prueba creados exitosamente.');

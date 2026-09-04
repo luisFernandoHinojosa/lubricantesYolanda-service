@@ -10,10 +10,11 @@ export const crearVenta = asyncHandler(async (req, res, next) => {
             items,
             tipo_descuento_global,
             valor_descuento_global,
-            metodo_pago,
-            monto_pagado,
+            pagos,
             notas,
         } = req.body;
+
+        const monto_pagado = pagos.reduce((sum, p) => sum + parseFloat(p.monto), 0);
 
         const venta = await ventaService.crearVenta({
             id_sucursal,
@@ -23,7 +24,7 @@ export const crearVenta = asyncHandler(async (req, res, next) => {
             items,
             tipo_descuento_global,
             valor_descuento_global,
-            metodo_pago,
+            pagos,
             monto_pagado,
             notas,
         });

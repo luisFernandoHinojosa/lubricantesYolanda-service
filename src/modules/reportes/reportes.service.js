@@ -9,7 +9,7 @@ const {
     Venta, DetalleVenta, Compra, DetalleCompra, Movimiento, CategoriaMovimiento,
     Producto, Presentacion, Lote, StockDistribucion, KardexMovimiento,
     SesionCaja, Cliente, Empleado, Sucursal, Ubicacion, Categoria,
-    Devolucion, DetalleDevolucion,
+    Devolucion, DetalleDevolucion, PagoVenta,
     sequelize
 } = db;
 
@@ -24,21 +24,20 @@ export const getReporteVentas = async (query = {}) => {
     const where = { createdAt: { [Op.between]: [start, end] } };
     if (id_sucursal) where.id_sucursal = id_sucursal;
     if (id_empleado) where.id_empleado = id_empleado;
-    if (metodo_pago) where.metodo_pago = metodo_pago;
+    const whereVentaStats = { ...where };
+    const includePagosStats = {
+        model: PagoVenta,
+        as: 'pagos',
+        attributes: ['metodo_pago', 'monto'],
+        ...(metodo_pago ? { where: { metodo_pago } } : {})
+    };
 
-    // 1. Get Summary Stats
     const stats = await Venta.findAll({
-        where,
+        where: whereVentaStats,
         attributes: [
-            'esta_activo',
-            'metodo_pago',
-            [fn('SUM', col('subtotal')), 'subtotal'],
-            [fn('SUM', col('monto_descuento_global')), 'descuento'],
-            [fn('SUM', col('total')), 'total'],
-            [fn('COUNT', col('id')), 'cantidad'],
+            'id', 'esta_activo', 'subtotal', 'monto_descuento_global', 'total', 'cambio_entregado'
         ],
-        group: ['esta_activo', 'metodo_pago'],
-        raw: true,
+        include: [includePagosStats]
     });
 
     const devoluciones = await Devolucion.findAll({
@@ -64,26 +63,33 @@ export const getReporteVentas = async (query = {}) => {
     let cancelledAmount = 0;
     const paymentMethods = {};
 
-    stats.forEach(s => {
-        const count = parseInt(s.cantidad) || 0;
-        const sub = parseFloat(s.subtotal) || 0;
-        const disc = parseFloat(s.descuento) || 0;
-        const tot = parseFloat(s.total) || 0;
+    stats.forEach(v => {
+        totalReceipts++;
 
-        totalReceipts += count;
+        if (v.esta_activo) {
+            activeSubtotal += parseFloat(v.subtotal);
+            activeDiscount += parseFloat(v.monto_descuento_global);
+            activeTotal += parseFloat(v.total);
 
-        if (s.esta_activo) {
-            activeSubtotal += sub;
-            activeDiscount += disc;
-            activeTotal += tot;
-
-            if (!paymentMethods[s.metodo_pago]) {
-                paymentMethods[s.metodo_pago] = { total: 0, cantidad: 0 };
+            if (v.pagos) {
+                let cambioAplicado = false;
+                v.pagos.forEach(p => {
+                    const monto = parseFloat(p.monto);
+                    if (!paymentMethods[p.metodo_pago]) {
+                        paymentMethods[p.metodo_pago] = { total: 0, cantidad: 0 };
+                    }
+                    paymentMethods[p.metodo_pago].cantidad++;
+                    
+                    let montoFinal = monto;
+                    if (p.metodo_pago === 'EFECTIVO' && !cambioAplicado) {
+                        montoFinal -= parseFloat(v.cambio_entregado || 0);
+                        cambioAplicado = true;
+                    }
+                    paymentMethods[p.metodo_pago].total += montoFinal;
+                });
             }
-            paymentMethods[s.metodo_pago].total += tot;
-            paymentMethods[s.metodo_pago].cantidad += count;
         } else {
-            cancelledAmount += tot;
+            cancelledAmount += parseFloat(v.total);
         }
     });
 
@@ -120,6 +126,7 @@ export const getReporteVentas = async (query = {}) => {
         order: [['createdAt', 'DESC']],
         distinct: true,
         include: [
+            { model: PagoVenta, as: 'pagos', attributes: ['metodo_pago', 'monto'], ...(metodo_pago ? { where: { metodo_pago } } : {}) },
             { model: Cliente, as: 'cliente', attributes: ['id', 'nombre', 'apellido_paterno'] },
             { model: Empleado, as: 'cajero', attributes: ['id', 'nombre', 'apellido_paterno'] },
             {
@@ -248,7 +255,7 @@ export const getReporteVentas = async (query = {}) => {
             number: v.numero_comprobante,
             date: v.createdAt,
             status,
-            paymentMethod: v.metodo_pago,
+            paymentMethod: v.pagos ? v.pagos.map(p => p.metodo_pago).join(', ') : null,
             customer: v.cliente ? {
                 id: v.cliente.id,
                 name: `${v.cliente.nombre} ${v.cliente.apellido_paterno || ''}`.trim()
@@ -584,10 +591,10 @@ export const getReporteFinanciero = async (query = {}) => {
 
     const utilidadOperativa = formatCurrency(utilidadBruta - totalGastosOp);
 
-    const flujoIngresos = await Venta.findAll({
+    const ventasFinanciero = await Venta.findAll({
         where: whereVentas,
-        attributes: ['metodo_pago', [fn('SUM', col('Venta.total')), 'total']],
-        group: ['metodo_pago'], raw: true,
+        attributes: ['id', 'cambio_entregado'],
+        include: [{ model: PagoVenta, as: 'pagos', attributes: ['metodo_pago', 'monto'] }]
     });
 
     const flujoEgresos = await Movimiento.findAll({
@@ -597,9 +604,23 @@ export const getReporteFinanciero = async (query = {}) => {
     });
 
     const flujoCaja = {};
-    flujoIngresos.forEach(r => {
-        if (!flujoCaja[r.metodo_pago]) flujoCaja[r.metodo_pago] = { ingresos: 0, egresos: 0 };
-        flujoCaja[r.metodo_pago].ingresos = formatCurrency(r.total);
+    ventasFinanciero.forEach(v => {
+        if (v.pagos) {
+            let cambioAplicado = false;
+            v.pagos.forEach(p => {
+                if (!flujoCaja[p.metodo_pago]) flujoCaja[p.metodo_pago] = { ingresos: 0, egresos: 0 };
+                let monto = parseFloat(p.monto);
+                if (p.metodo_pago === 'EFECTIVO' && !cambioAplicado) {
+                    monto -= parseFloat(v.cambio_entregado || 0);
+                    cambioAplicado = true;
+                }
+                flujoCaja[p.metodo_pago].ingresos += monto;
+            });
+        }
+    });
+    
+    Object.keys(flujoCaja).forEach(k => {
+        flujoCaja[k].ingresos = formatCurrency(flujoCaja[k].ingresos);
     });
     flujoEgresos.forEach(r => {
         const key = r.tipoPago;

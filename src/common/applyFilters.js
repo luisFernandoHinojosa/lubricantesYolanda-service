@@ -41,7 +41,7 @@ export const VENTA_CONFIG = {
     '$cajero.nombre$',
     '$cajero.apellido_paterno$'
   ],
-  filterableFields: ['id_cliente', 'id_empleado', 'metodo_pago'],
+  filterableFields: ['id_cliente', 'id_empleado'],
   defaultSort: ['createdAt', 'DESC']
 };
 
