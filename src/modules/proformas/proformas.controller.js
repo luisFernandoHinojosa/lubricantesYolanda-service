@@ -120,16 +120,17 @@ export const facturarProforma = asyncHandler(async (req, res, next) => {
         const { id: id_usuario, id_sucursal } = req.user;
         const {
             id_sesion_caja,
-            metodo_pago,
-            monto_pagado,
+            pagos,
             notas_adicionales,
         } = req.body;
+
+        const monto_pagado = pagos.reduce((sum, p) => sum + parseFloat(p.monto), 0);
 
         const venta = await proformaService.facturarProforma(id, {
             id_sucursal,
             id_usuario,
             id_sesion_caja,
-            metodo_pago,
+            pagos,
             monto_pagado,
             notas_adicionales,
         });

@@ -1,7 +1,7 @@
 import { Op } from 'sequelize';
 import db from '../../database/index.js';
 
-const { SesionCaja, Venta, Usuario, Sucursal, Cliente, Empleado, sequelize } = db;
+const { SesionCaja, Venta, PagoVenta, Usuario, Sucursal, Cliente, Empleado, sequelize } = db;
 
 // ─── ABRIR SESIÓN ────────────────────────────────────────────────────────────
 export const abrirSesion = async ({ id_sucursal, id_usuario, monto_apertura }) => {
@@ -76,17 +76,35 @@ export const getSesionActiva = async ({ id_usuario, id_sucursal }) => {
 // ─── CALCULAR TOTALES DE LA SESIÓN ──────────────────────────────────────────
 const calcularTotalesSesion = async (id_sesion_caja) => {
     const ventas = await Venta.findAll({
-        where: { id_sesion_caja },
-        attributes: ['metodo_pago', 'total'],
+        where: { id_sesion_caja, esta_activo: true },
+        attributes: ['total', 'cambio_entregado'],
+        include: [{
+            model: PagoVenta,
+            as: 'pagos',
+            attributes: ['metodo_pago', 'monto']
+        }]
     });
 
-    const ventasEfectivo = ventas
-        .filter((v) => v.metodo_pago === 'EFECTIVO')
-        .reduce((acc, v) => acc + parseFloat(v.total), 0);
+    let ventasEfectivo = 0;
+    let ventasDigital = 0;
 
-    const ventasDigital = ventas
-        .filter((v) => v.metodo_pago !== 'EFECTIVO')
-        .reduce((acc, v) => acc + parseFloat(v.total), 0);
+    ventas.forEach((v) => {
+        let efectivoVenta = 0;
+        let digitalVenta = 0;
+
+        if (v.pagos) {
+            v.pagos.forEach(p => {
+                const monto = parseFloat(p.monto);
+                if (p.metodo_pago === 'EFECTIVO') efectivoVenta += monto;
+                else digitalVenta += monto;
+            });
+        }
+        
+        efectivoVenta -= parseFloat(v.cambio_entregado || 0);
+
+        ventasEfectivo += efectivoVenta;
+        ventasDigital += digitalVenta;
+    });
 
     const totalVentas = ventasEfectivo + ventasDigital;
 
@@ -191,13 +209,18 @@ export const getDetalleSesion = async (id_sesion) => {
             {
                 model: Venta,
                 as: 'ventas',
-                attributes: ['id', 'numero_comprobante', 'total', 'metodo_pago', 'createdAt'],
+                attributes: ['id', 'numero_comprobante', 'total', 'createdAt'],
                 include: [
                     {
                         model: Cliente,
                         as: 'cliente',
                         attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno', 'ci', 'telefono', 'correo_electronico'],
                     },
+                    {
+                        model: PagoVenta,
+                        as: 'pagos',
+                        attributes: ['metodo_pago', 'monto']
+                    }
                 ],
             },
         ],

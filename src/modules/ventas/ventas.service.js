@@ -6,6 +6,7 @@ import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
 const {
     Venta,
     DetalleVenta,
+    PagoVenta,
     SesionCaja,
     Producto,
     Presentacion,
@@ -227,7 +228,7 @@ const validarYEnriquecerItems = async (items, id_sucursal, transaction) => {
 export const crearVenta = async ({
     id_sucursal, id_sesion_caja, id_usuario, id_cliente,
     items, tipo_descuento_global, valor_descuento_global = 0,
-    metodo_pago, monto_pagado, notas,
+    pagos, monto_pagado, notas,
 }) => {
     const empleado = await Empleado.findOne({ where: { usuario_id: id_usuario } });
     if (!empleado) {
@@ -295,7 +296,6 @@ export const crearVenta = async ({
             valor_descuento_global,
             monto_descuento_global: monto_descuento_global.toFixed(2),
             total: total.toFixed(2),
-            metodo_pago,
             monto_pagado: parseFloat(monto_pagado).toFixed(2),
             cambio_entregado: cambio_entregado.toFixed(2),
             notas: notas || null,
@@ -312,6 +312,16 @@ export const crearVenta = async ({
                 monto_descuento: item.monto_descuento,
                 subtotal: item.subtotal,
                 numero_serie: item.numero_serie,
+            })),
+            { transaction: t }
+        );
+
+        await PagoVenta.bulkCreate(
+            pagos.map((p) => ({
+                id_venta: venta.id,
+                metodo_pago: p.metodo_pago,
+                monto: parseFloat(p.monto).toFixed(2),
+                referencia: p.referencia || null
             })),
             { transaction: t }
         );
@@ -453,6 +463,11 @@ export const getVentaById = async (id) => {
                 model: Empleado,
                 as: 'cajero',
                 attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
+            },
+            {
+                model: PagoVenta,
+                as: 'pagos',
+                attributes: ['id', 'metodo_pago', 'monto', 'referencia']
             },
             {
                 model: DetalleVenta,
@@ -617,7 +632,7 @@ export const getVentaById = async (id) => {
         valor_descuento_global: v.valor_descuento_global,
         monto_descuento_global: v.monto_descuento_global,
         total: net.toFixed(2), // Siempre mantener el total de la venta, incluso si fue anulada
-        metodo_pago: v.metodo_pago,
+        pagos: v.pagos,
         monto_pagado: v.monto_pagado,
         cambio_entregado: v.cambio_entregado,
         createdAt: v.createdAt,
@@ -663,6 +678,11 @@ export const findAllVentas = async (query, userContext = {}) => {
             model: Cliente,
             as: 'cliente',
             attributes: ['id', 'nombre', 'apellido_paterno', 'ci']
+        },
+        {
+            model: PagoVenta,
+            as: 'pagos',
+            attributes: ['id', 'metodo_pago', 'monto', 'referencia']
         },
         {
             model: Sucursal,
@@ -752,7 +772,7 @@ export const findAllVentas = async (query, userContext = {}) => {
             valor_descuento_global: v.valor_descuento_global,
             monto_descuento_global: v.monto_descuento_global,
             total: net.toFixed(2), // Siempre devuelve el total calculado, incluso si está anulado
-            metodo_pago: v.metodo_pago,
+            pagos: v.pagos,
             monto_pagado: v.monto_pagado,
             cambio_entregado: v.cambio_entregado,
             createdAt: v.createdAt,
@@ -777,7 +797,12 @@ export const findAllVentas = async (query, userContext = {}) => {
 export const getResumenVentasSesion = async (id_sesion_caja) => {
     const ventas = await Venta.findAll({
         where: { id_sesion_caja },
-        attributes: ['metodo_pago', 'total', 'monto_descuento_global', 'esta_activo'],
+        attributes: ['total', 'monto_descuento_global', 'esta_activo', 'cambio_entregado'],
+        include: [{
+            model: PagoVenta,
+            as: 'pagos',
+            attributes: ['metodo_pago', 'monto']
+        }]
     });
 
     const resumen = {
@@ -801,9 +826,25 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
         const total = parseFloat(v.total);
         resumen.gran_total += total;
         resumen.total_descuentos += parseFloat(v.monto_descuento_global || 0);
-        if (v.metodo_pago === 'EFECTIVO') resumen.total_efectivo += total;
-        else if (v.metodo_pago === 'QR') resumen.total_qr += total;
-        else if (v.metodo_pago === 'TARJETA') resumen.total_tarjeta += total;
+        
+        let efectivo = 0;
+        let qr = 0;
+        let tarjeta = 0;
+        
+        if (v.pagos) {
+            v.pagos.forEach(p => {
+                const monto = parseFloat(p.monto);
+                if (p.metodo_pago === 'EFECTIVO') efectivo += monto;
+                else if (p.metodo_pago === 'QR') qr += monto;
+                else if (p.metodo_pago === 'TARJETA') tarjeta += monto;
+            });
+        }
+        
+        efectivo -= parseFloat(v.cambio_entregado || 0);
+
+        resumen.total_efectivo += efectivo;
+        resumen.total_qr += qr;
+        resumen.total_tarjeta += tarjeta;
     });
 
     // Incluir devoluciones/cambios de esta sesión

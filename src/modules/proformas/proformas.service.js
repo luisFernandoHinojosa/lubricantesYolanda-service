@@ -272,7 +272,7 @@ export const actualizarProforma = async (id, data) => {
 };
 
 export const facturarProforma = async (id, {
-    id_sucursal, id_usuario, id_sesion_caja, metodo_pago, monto_pagado, notas_adicionales
+    id_sucursal, id_usuario, id_sesion_caja, pagos, monto_pagado, notas_adicionales
 }) => {
     const proforma = await getProformaById(id);
     
@@ -319,7 +319,7 @@ export const facturarProforma = async (id, {
             items: itemsParaVenta,
             tipo_descuento_global: proforma.tipo_descuento_global,
             valor_descuento_global: proforma.valor_descuento_global,
-            metodo_pago,
+            pagos,
             monto_pagado,
             notas: notasCompletas
         });

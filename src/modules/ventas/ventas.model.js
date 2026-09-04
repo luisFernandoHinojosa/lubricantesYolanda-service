@@ -8,6 +8,7 @@ class Venta extends Model {
         this.belongsTo(models.Cliente, { foreignKey: 'id_cliente', as: 'cliente' });
         this.hasMany(models.DetalleVenta, { foreignKey: 'id_venta', as: 'detalles' });
         this.hasMany(models.Devolucion, { foreignKey: 'id_venta_original', as: 'devoluciones' });
+        this.hasMany(models.PagoVenta, { foreignKey: 'id_venta', as: 'pagos' });
     }
 }
 
@@ -62,10 +63,6 @@ export default (sequelize) => {
             type: DataTypes.DECIMAL(10, 2),
             allowNull: false
         },
-        metodo_pago: {
-            type: DataTypes.ENUM('EFECTIVO', 'TARJETA', 'TRANSFERENCIA', 'QR'),
-            allowNull: false
-        },
         monto_pagado: {
             type: DataTypes.DECIMAL(10, 2),
             allowNull: false
@@ -74,6 +71,10 @@ export default (sequelize) => {
             type: DataTypes.DECIMAL(10, 2),
             allowNull: false
         },
+        // metodo_pago: {
+        //     type: DataTypes.ENUM('EFECTIVO', 'TARJETA', 'TRANSFERENCIA', 'QR'),
+        //     allowNull: false
+        // },
         notas: {
             type: DataTypes.TEXT
         },

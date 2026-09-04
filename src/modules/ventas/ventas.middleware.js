@@ -43,7 +43,7 @@ export const requireSesionAbierta = async (req, res, next) => {
 export const validateVenta = (req, res, next) => {
     const {
         id_sesion_caja, id_cliente, items,
-        metodo_pago, monto_pagado,
+        pagos,
         tipo_descuento_global, valor_descuento_global,
     } = req.body;
 
@@ -51,17 +51,24 @@ export const validateVenta = (req, res, next) => {
 
     // ── Campos raíz obligatorios ──────────────────────────────────────────────
     if (!id_sesion_caja) errores.push('id_sesion_caja es requerido.');
-    if (!metodo_pago) errores.push('metodo_pago es requerido.');
 
-    if (monto_pagado === undefined || monto_pagado === null)
-        errores.push('monto_pagado es requerido.');
-    else if (parseFloat(monto_pagado) < 0)
-        errores.push('monto_pagado no puede ser negativo.');
-
-    // ── Método de pago ────────────────────────────────────────────────────────
+    // ── Métodos de pago ────────────────────────────────────────────────────────
     const metodosValidos = ['EFECTIVO', 'QR', 'TARJETA', 'TRANSFERENCIA', 'CHEQUE', 'OTRO'];
-    if (metodo_pago && !metodosValidos.includes(metodo_pago)) {
-        errores.push(`metodo_pago debe ser uno de: ${metodosValidos.join(', ')}.`);
+    if (!Array.isArray(pagos) || pagos.length === 0) {
+        errores.push('pagos debe ser un array con al menos un método de pago.');
+    } else {
+        pagos.forEach((pago, idx) => {
+            const base = `pagos[${idx}]`;
+            if (!pago.metodo_pago) errores.push(`${base}.metodo_pago es requerido.`);
+            else if (!metodosValidos.includes(pago.metodo_pago)) {
+                errores.push(`${base}.metodo_pago debe ser uno de: ${metodosValidos.join(', ')}.`);
+            }
+            if (pago.monto === undefined || pago.monto === null) {
+                errores.push(`${base}.monto es requerido.`);
+            } else if (isNaN(parseFloat(pago.monto)) || parseFloat(pago.monto) <= 0) {
+                errores.push(`${base}.monto debe ser un número mayor a 0.`);
+            }
+        });
     }
 
     // ── Items ─────────────────────────────────────────────────────────────────
