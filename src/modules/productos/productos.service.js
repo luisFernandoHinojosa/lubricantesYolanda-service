@@ -70,6 +70,7 @@ export class ProductoService {
       const baseProductInfo = {
         Foto: pData.imagen_url,
         Nombre: pData.nombre_comercial,
+        Descripcion: pData.descripcion,
         CodigoBarras: pData.codigo_barras,
         Categoria: pData.categoria ? pData.categoria.nombre : null,
         Marca: pData.marca ? pData.marca.nombre : null,
@@ -125,6 +126,7 @@ export class ProductoService {
     worksheet.columns = [
       { header: 'Foto URL', key: 'Foto', width: 40 },
       { header: 'Nombre', key: 'Nombre', width: 30 },
+      { header: 'Descripción', key: 'Descripcion', width: 40 },
       { header: 'Código de Barras', key: 'CodigoBarras', width: 20 },
       { header: 'Categoría', key: 'Categoria', width: 20 },
       { header: 'Marca', key: 'Marca', width: 20 },
