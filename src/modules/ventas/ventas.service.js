@@ -762,7 +762,7 @@ export const findAllVentas = async (query, userContext = {}) => {
                 }
             });
         }
-
+        // mi observacion
         return {
             id: v.id,
             numero_comprobante: v.numero_comprobante,
