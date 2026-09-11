@@ -133,9 +133,19 @@ export class ProductoController {
     try {
       const { id_producto } = req.params;
       const producto = await productosService.getDetalleStockById(id_producto);
+      
+      const categorias = await categoriasService.listFull();
+      const unidades_medida = await unidadMedidasService.listFull();
+      const marcas = await marcasService.listFull();
+
       res.status(200).json({
         status: 'success',
         data: producto,
+        extraData: {
+          categorias,
+          unidades_medida,
+          marcas,
+        }
       });
     } catch (err) {
       next(err);

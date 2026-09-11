@@ -18,6 +18,14 @@ export default (sequelize) => {
             allowNull: false,
             unique: true,
         },
+        siat_codigo_actividad: {
+            type: DataTypes.STRING(20),
+            allowNull: true,
+        },
+        siat_codigo_producto: {
+            type: DataTypes.INTEGER,
+            allowNull: true,
+        },
         descripcion: {
             type: DataTypes.TEXT,
             allowNull: true,

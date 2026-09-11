@@ -27,6 +27,11 @@ export default (sequelize) => {
             defaultValue: true,
             allowNull: false,
         },
+        codigo_fact: {
+            type: DataTypes.INTEGER,
+            allowNull: false,
+            unique: true,
+        },
     }, {
         sequelize,
         modelName: 'UnidadMedida',

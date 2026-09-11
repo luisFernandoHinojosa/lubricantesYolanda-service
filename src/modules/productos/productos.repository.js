@@ -70,7 +70,7 @@ export class ProductoRepository {
 
   async findAllProductsWithLotes() {
     return this.productoModel.findAll({
-      attributes: ['id', 'imagen_url', 'nombre_comercial', 'codigo_barras', 'stock_minimo', 'precio_venta', 'esta_activo'],
+      attributes: ['id', 'imagen_url', 'nombre_comercial', 'descripcion', 'codigo_barras', 'stock_minimo', 'precio_venta', 'esta_activo'],
       include: [
         { model: db.Categoria, as: 'categoria', attributes: ['nombre'] },
         { model: db.Marca, as: 'marca', attributes: ['nombre'] },
