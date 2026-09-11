@@ -3,6 +3,7 @@ import { z } from 'zod';
 const unidadMedidaBaseSchema = z.object({
   nombre: z.string().min(2, 'El nombre debe tener al menos 2 caracteres.'),
   abreviatura: z.string().min(1, 'La abreviatura es requerida.'),
+  codigo_fact: z.coerce.number().int().nonnegative('El código de facturación es requerido.'),
   esta_activo: z.boolean().optional(),
 });
 
