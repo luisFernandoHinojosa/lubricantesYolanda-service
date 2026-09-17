@@ -702,6 +702,12 @@ export const findAllVentas = async (query, userContext = {}) => {
         }
     ];
 
+    if (query.metodo_pago) {
+        where.id = {
+            [Op.in]: sequelize.literal(`(SELECT "id_venta" FROM "PagosVenta" WHERE "metodo_pago" = ${sequelize.escape(query.metodo_pago)})`)
+        };
+    }
+
     const [{ rows: ventasList, count: total }, allVentasForSum] = await Promise.all([
         Venta.findAndCountAll({
             where,
@@ -730,9 +736,12 @@ export const findAllVentas = async (query, userContext = {}) => {
     ]);
 
     let totalMontoVentas = 0;
-    allVentasForSum.forEach(v => {
-        if (!v.esta_activo) return; // Si está anulada, el neto es 0
+    let cantidad_ventas_registradas = 0;
+    let cantidad_ventas_anuladas = 0;
+    let total_monto_registradas = 0;
+    let total_monto_anuladas = 0;
 
+    allVentasForSum.forEach(v => {
         let net = parseFloat(v.total);
         if (v.devoluciones) {
             v.devoluciones.forEach(dev => {
@@ -740,8 +749,17 @@ export const findAllVentas = async (query, userContext = {}) => {
                 else if (dev.tipo === 'CAMBIO') net += parseFloat(dev.monto_diferencia);
             });
         }
-        totalMontoVentas += net;
+        
+        if (v.esta_activo) {
+            cantidad_ventas_registradas++;
+            total_monto_registradas += net;
+        } else {
+            cantidad_ventas_anuladas++;
+            total_monto_anuladas += parseFloat(v.total);
+        }
     });
+
+    totalMontoVentas = total_monto_registradas;
 
     const ventas = ventasList.map(v => {
         const isCancelled = !v.esta_activo;
@@ -788,6 +806,12 @@ export const findAllVentas = async (query, userContext = {}) => {
         ventas,
         total,
         totalMontoVentas,
+        widgets: {
+            cantidad_ventas_registradas,
+            cantidad_ventas_anuladas,
+            total_monto_registradas,
+            total_monto_anuladas
+        },
         page,
         perPage,
         totalPages: Math.ceil(total / perPage)
