@@ -2,6 +2,8 @@ import { Op } from 'sequelize';
 import db from '../../database/index.js';
 import { VENTA_CONFIG } from '../../common/applyFilters.js';
 import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
+import config from '../../config/index.js';
+import { emitirFactura } from './facturacion.service.js';
 
 const {
     Venta,
@@ -23,6 +25,7 @@ const {
     Sucursal,
     Devolucion,
     DetalleDevolucion,
+    Factura,
 } = db;
 
 const generarNumeroComprobante = async (id_sucursal, transaction) => {
@@ -229,6 +232,7 @@ export const crearVenta = async ({
     id_sucursal, id_sesion_caja, id_usuario, id_cliente,
     items, tipo_descuento_global, valor_descuento_global = 0,
     pagos, monto_pagado, notas,
+    facturar = false, datos_facturacion = null,
 }) => {
     const empleado = await Empleado.findOne({ where: { usuario_id: id_usuario } });
     if (!empleado) {
@@ -299,6 +303,8 @@ export const crearVenta = async ({
             monto_pagado: parseFloat(monto_pagado).toFixed(2),
             cambio_entregado: cambio_entregado.toFixed(2),
             notas: notas || null,
+            estado_facturacion: facturar ? 'PENDIENTE' : 'NO_APLICA',
+            datos_facturacion_cliente: facturar ? datos_facturacion : null,
         }, { transaction: t });
 
         await DetalleVenta.bulkCreate(
@@ -360,7 +366,17 @@ export const crearVenta = async ({
         console.error('Error acumulando puntos de lealtad:', e.message);
     }
 
-    return getVentaById(ventaCreada.id);
+    // ── Facturación (fuera de la transacción DB) ──────────────────────────────
+    let resultadoFacturacion = null;
+    if (facturar) {
+        resultadoFacturacion = await emitirFactura(ventaCreada.id, id_usuario);
+    }
+
+    const ventaCompleta = await getVentaById(ventaCreada.id);
+    if (resultadoFacturacion) {
+        ventaCompleta.resultado_facturacion = resultadoFacturacion;
+    }
+    return ventaCompleta;
 };
 
 export const anularVenta = async (id_venta, id_usuario) => {
@@ -463,6 +479,10 @@ export const getVentaById = async (id) => {
                 model: Empleado,
                 as: 'cajero',
                 attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
+            },
+            {
+                model: Factura,
+                as: 'factura'
             },
             {
                 model: PagoVenta,
@@ -641,6 +661,7 @@ export const getVentaById = async (id) => {
         cajero: v.cajero,
         sucursal: v.sucursal,
         esta_activo: v.esta_activo,
+        factura: v.factura,
         // Nuevos atributos de coherencia
         monto_devuelto: retAmt.toFixed(2),
         diferencia_cambio: exchDiff.toFixed(2),

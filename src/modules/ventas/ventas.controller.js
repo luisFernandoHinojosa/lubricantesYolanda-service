@@ -1,5 +1,6 @@
 import asyncHandler from '../../utils/asyncHandler.js';
 import * as ventaService from '../ventas/ventas.service.js';
+import * as facturacionService from '../ventas/facturacion.service.js';
 
 export const crearVenta = asyncHandler(async (req, res, next) => {
     try {
@@ -12,6 +13,7 @@ export const crearVenta = asyncHandler(async (req, res, next) => {
             valor_descuento_global,
             pagos,
             notas,
+            facturar,
         } = req.body;
 
         const monto_pagado = pagos.reduce((sum, p) => sum + parseFloat(p.monto), 0);
@@ -27,6 +29,7 @@ export const crearVenta = asyncHandler(async (req, res, next) => {
             pagos,
             monto_pagado,
             notas,
+            facturar: facturar || false,
         });
 
         return res.status(201).json({
@@ -108,6 +111,23 @@ export const anularVenta = asyncHandler(async (req, res, next) => {
             status: "success",
             message: 'Venta anulada exitosamente.',
             //data: ventaAnulada 
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+export const reintentarFactura = asyncHandler(async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const { id: id_usuario } = req.user;
+        const resultado = await facturacionService.reintentarFactura(id, id_usuario);
+        return res.status(200).json({
+            status: "success",
+            message: resultado?.success
+                ? 'Factura emitida exitosamente.'
+                : 'Error al emitir factura. Revise los detalles.',
+            data: resultado,
         });
     } catch (err) {
         next(err);

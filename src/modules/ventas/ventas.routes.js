@@ -10,6 +10,7 @@ import {
     listarVentas,
     getResumenSesion,
     anularVenta,
+    reintentarFactura,
 } from '../ventas/ventas.controller.js';
 
 const router = Router();
@@ -21,5 +22,6 @@ router.get('/', listarVentas);
 router.get('/sesion/:id_sesion/resumen', getResumenSesion);
 router.get('/:id', getVenta);
 router.put('/:id/anular', anularVenta);
+router.post('/:id/reintentar-factura', reintentarFactura);
 
 export default router;

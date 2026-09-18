@@ -13,8 +13,9 @@ const startServer = async () => {
     await db.sequelize.authenticate();
     // await db.sequelize.query('DROP SCHEMA IF EXISTS public CASCADE;');
     // await db.sequelize.query('CREATE SCHEMA public;');
-    await db.sequelize.sync(/*{ alter: true }*/); // { force: true } { alter: true }
-    //await runSeeders();
+    await db.sequelize.sync({/* force: true */ }); // { force: true } { alter: true }
+    //commetario d prueba mas comentario
+    // await runSeeders();
     cache.setClient(redisClient);
     logger.info('CacheService conectado a Redis');
     console.log('Paso 6: Abriendo puerto del servidor...');

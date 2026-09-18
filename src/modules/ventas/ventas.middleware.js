@@ -45,6 +45,7 @@ export const validateVenta = (req, res, next) => {
         id_sesion_caja, id_cliente, items,
         pagos,
         tipo_descuento_global, valor_descuento_global,
+        facturar,
     } = req.body;
 
     const errores = [];

@@ -9,6 +9,7 @@ class Venta extends Model {
         this.hasMany(models.DetalleVenta, { foreignKey: 'id_venta', as: 'detalles' });
         this.hasMany(models.Devolucion, { foreignKey: 'id_venta_original', as: 'devoluciones' });
         this.hasMany(models.PagoVenta, { foreignKey: 'id_venta', as: 'pagos' });
+        this.hasOne(models.Factura, { foreignKey: 'id_venta', as: 'factura' });
     }
 }
 

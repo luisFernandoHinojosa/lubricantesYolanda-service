@@ -42,7 +42,7 @@ export const seedPruebasVentas = async () => {
 
         const [unidad] = await UnidadMedida.findOrCreate({
             where: { nombre: 'Litro' },
-            defaults: { abreviatura: 'L', esta_activo: true }
+            defaults: { abreviatura: 'L', esta_activo: true, codigo_fact: '983454' }
         });
 
         // 3. Crear Producto de prueba
