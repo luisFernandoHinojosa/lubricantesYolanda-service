@@ -20,6 +20,18 @@ export class ClienteService {
     return cliente;
   }
 
+  async getByCi(ci) {
+    const cacheKeyCi = `cliente:ci:${ci}`;
+    const cached = await cache.get(cacheKeyCi);
+    if (cached) return cached;
+
+    const cliente = await clienteRepository.findByCi(ci);
+    if (!cliente) throw new NotFoundError(`Cliente con CI ${ci}`);
+
+    await cache.set(cacheKeyCi, cliente, CACHE_TTL);
+    return cliente;
+  }
+
   async list(query) {
     return clienteRepository.findAllPaginated({}, query);
   }

@@ -20,6 +20,15 @@ export class ClienteController {
     }
   };
 
+  getByCi = async (req, res, next) => {
+    try {
+      const cliente = await clienteService.getByCi(req.params.ci);
+      res.status(200).json({ status: 'success', data: cliente });
+    } catch (err) {
+      next(err);
+    }
+  };
+
   create = async (req, res, next) => {
     try {
       const cliente = await clienteService.create(req.body);
