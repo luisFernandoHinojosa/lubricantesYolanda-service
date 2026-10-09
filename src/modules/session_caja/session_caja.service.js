@@ -1,5 +1,6 @@
 import { Op } from 'sequelize';
 import db from '../../database/index.js';
+import { METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
 
 const { SesionCaja, Venta, PagoVenta, Usuario, Sucursal, Cliente, Empleado, sequelize } = db;
 
@@ -85,30 +86,26 @@ const calcularTotalesSesion = async (id_sesion_caja) => {
         }]
     });
 
-    let ventasEfectivo = 0;
-    let ventasDigital = 0;
+    // Total por cada método de pago del SIAT (efectivo neto de cambio)
+    const ventasPorMetodo = Object.fromEntries(METODOS_PAGO_VALIDOS.map((m) => [m, 0]));
 
     ventas.forEach((v) => {
-        let efectivoVenta = 0;
-        let digitalVenta = 0;
-
         if (v.pagos) {
             v.pagos.forEach(p => {
-                const monto = parseFloat(p.monto);
-                if (p.metodo_pago === 'EFECTIVO') efectivoVenta += monto;
-                else digitalVenta += monto;
+                if (p.metodo_pago in ventasPorMetodo) {
+                    ventasPorMetodo[p.metodo_pago] += parseFloat(p.monto);
+                }
             });
         }
-        
-        efectivoVenta -= parseFloat(v.cambio_entregado || 0);
 
-        ventasEfectivo += efectivoVenta;
-        ventasDigital += digitalVenta;
+        ventasPorMetodo.EFECTIVO -= parseFloat(v.cambio_entregado || 0);
     });
 
-    const totalVentas = ventasEfectivo + ventasDigital;
+    const ventasEfectivo = ventasPorMetodo.EFECTIVO;
+    const totalVentas = Object.values(ventasPorMetodo).reduce((acc, m) => acc + m, 0);
+    const ventasDigital = totalVentas - ventasEfectivo;
 
-    return { ventasEfectivo, ventasDigital, totalVentas, cantidadVentas: ventas.length };
+    return { ventasEfectivo, ventasDigital, ventasPorMetodo, totalVentas, cantidadVentas: ventas.length };
 };
 
 // ─── CERRAR SESIÓN (ARQUEO) ──────────────────────────────────────────────────
@@ -131,7 +128,7 @@ export const cerrarSesion = async ({ id_sesion, id_usuario, monto_cierre }) => {
         throw err;
     }
 
-    const { ventasEfectivo, ventasDigital, totalVentas, cantidadVentas } =
+    const { ventasEfectivo, ventasDigital, ventasPorMetodo, totalVentas, cantidadVentas } =
         await calcularTotalesSesion(id_sesion);
 
     // Efectivo teórico = monto apertura + ventas en efectivo del turno
@@ -151,6 +148,7 @@ export const cerrarSesion = async ({ id_sesion, id_usuario, monto_cierre }) => {
             monto_apertura: parseFloat(sesion.monto_apertura),
             ventas_efectivo: ventasEfectivo,
             ventas_digital: ventasDigital,
+            ventas_por_metodo: ventasPorMetodo,
             total_ventas: totalVentas,
             cantidad_ventas: cantidadVentas,
             monto_teorico,
@@ -232,7 +230,7 @@ export const getDetalleSesion = async (id_sesion) => {
         throw err;
     }
 
-    const { ventasEfectivo, ventasDigital, totalVentas, cantidadVentas } =
+    const { ventasEfectivo, ventasDigital, ventasPorMetodo, totalVentas, cantidadVentas } =
         await calcularTotalesSesion(id_sesion);
 
     return {
@@ -240,6 +238,7 @@ export const getDetalleSesion = async (id_sesion) => {
         totales: {
             ventas_efectivo: ventasEfectivo,
             ventas_digital: ventasDigital,
+            ventas_por_metodo: ventasPorMetodo,
             total_ventas: totalVentas,
             cantidad_ventas: cantidadVentas,
         },
