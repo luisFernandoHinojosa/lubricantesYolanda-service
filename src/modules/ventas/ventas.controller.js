@@ -4,10 +4,11 @@ import * as facturacionService from '../ventas/facturacion.service.js';
 
 export const crearVenta = asyncHandler(async (req, res, next) => {
     try {
-        const { id: id_usuario, id_sucursal } = req.user;
+        const { id: id_usuario, name_user, id_sucursal } = req.user;
         const {
             id_sesion_caja,
             id_cliente,
+            cliente,
             items,
             tipo_descuento_global,
             valor_descuento_global,
@@ -22,7 +23,9 @@ export const crearVenta = asyncHandler(async (req, res, next) => {
             id_sucursal,
             id_sesion_caja,
             id_usuario,
+            name_user,
             id_cliente,
+            cliente,
             items,
             tipo_descuento_global,
             valor_descuento_global,
@@ -120,8 +123,8 @@ export const anularVenta = asyncHandler(async (req, res, next) => {
 export const reintentarFactura = asyncHandler(async (req, res, next) => {
     try {
         const { id } = req.params;
-        const { id: id_usuario } = req.user;
-        const resultado = await facturacionService.reintentarFactura(id, id_usuario);
+        const { name_user } = req.user;
+        const resultado = await facturacionService.reintentarFactura(id, name_user);
         return res.status(200).json({
             status: "success",
             message: resultado?.success

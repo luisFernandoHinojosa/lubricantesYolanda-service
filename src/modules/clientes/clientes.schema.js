@@ -1,5 +1,6 @@
 // src/modules/clientes/clientes.schema.js
 import { z } from 'zod';
+import { TIPO_DOCUMENTO_IDENTIDAD, TIPOS_DOCUMENTO_IDENTIDAD_VALIDOS } from '../../constants/business.constants.js';
 
 // ─── Helpers reutilizables ───────────────────────────────────────────────────
 
@@ -17,22 +18,29 @@ const nullableEnum = (values) =>
 
 // ─── Schema base del cliente ─────────────────────────────────────────────────
 
-const clienteBaseSchema = z.object({
+export const clienteBaseSchema = z.object({
   ci: z
     .string({ required_error: 'El CI es obligatorio' })
     .min(5, 'El CI debe tener al menos 5 caracteres')
     .max(20, 'El CI no puede superar 20 caracteres'),
+
+  // Código SIAT: 1=CI, 2=CEX, 3=PAS, 4=OD, 5=NIT
+  tipo_documento: z.coerce
+    .number({ invalid_type_error: 'Debe ser un número' })
+    .int()
+    .refine((v) => TIPOS_DOCUMENTO_IDENTIDAD_VALIDOS.includes(v), 'Tipo de documento inválido (1=CI, 2=CEX, 3=PAS, 4=OD, 5=NIT)')
+    .default(TIPO_DOCUMENTO_IDENTIDAD.CI),
+
+  complemento: nullableString(5),
 
   nombre: z
     .string({ required_error: 'El nombre es obligatorio' })
     .min(2, 'Mínimo 2 caracteres')
     .max(100, 'Máximo 100 caracteres'),
 
-  apellido_paterno: z
-    .string({ required_error: 'El apellido paterno es obligatorio' })
-    .max(50, 'No puede superar 50 caracteres'),
+  apellido_paterno: nullableString(50),
 
-  apellido_materno: z.string().max(50).optional(),
+  apellido_materno: nullableString(50),
 
   correo_electronico: z
     .string()
@@ -42,11 +50,12 @@ const clienteBaseSchema = z.object({
     .optional(),
 
   fecha_nacimiento: z.preprocess(
-    (v) => (typeof v === 'string' || v instanceof Date ? new Date(v) : v),
+    (v) => (v === '' || v === 'undefined' || v == null ? null : (typeof v === 'string' || v instanceof Date ? new Date(v) : v)),
     z.date({
-      required_error: 'La fecha de nacimiento es obligatoria',
       invalid_type_error: 'Debe ser una fecha válida',
     })
+      .nullable()
+      .optional()
   ),
 
   telefono: nullableString(20),
@@ -95,6 +104,16 @@ export const listClientesSchema = z.object({
   }),
 });
 
+// ─── Schema del cliente al registrar o vincular en una venta ──────────────────
+// En una venta solo el `ci` es estrictamente obligatorio para identificar al cliente.
+// Si se envían otros campos (para registrarlo si no existe), se validan con las mismas
+// reglas que clienteBaseSchema.
+export const clienteVentaSchema = clienteBaseSchema.partial().extend({
+  ci: z
+    .string({ required_error: 'El CI es obligatorio' })
+    .min(5, 'El CI debe tener al menos 5 caracteres')
+    .max(20, 'El CI no puede superar 20 caracteres'),
+});
 
 /** @typedef {import('zod').infer<typeof createClienteSchema>['body']} CreateClienteDTO */
 /** @typedef {import('zod').infer<typeof updateClienteSchema>['body']} UpdateClienteDTO */

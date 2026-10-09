@@ -4,6 +4,7 @@ import { VENTA_CONFIG } from '../../common/applyFilters.js';
 import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
 import config from '../../config/index.js';
 import { emitirFactura } from './facturacion.service.js';
+import { TIPO_DOCUMENTO_IDENTIDAD, METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
 
 const {
     Venta,
@@ -28,25 +29,133 @@ const {
     Factura,
 } = db;
 
+// ─── Resolución de cliente ───────────────────────────────────────────────────
+// Maneja 3 escenarios:
+//   1. Objeto `cliente` con CI → buscar por CI, crear si no existe
+//   2. `id_cliente` (UUID) → buscar por PK (retrocompatible)
+//   3. Ninguno → usar cliente genérico CI: 000000
+// ─────────────────────────────────────────────────────────────────────────────
+const resolverCliente = async ({ cliente: datosCliente, id_cliente, transaction }) => {
+    // ── Escenario 1: Objeto `cliente` con CI ──────────────────────────────────
+    if (datosCliente && datosCliente.ci) {
+        const clienteExistente = await Cliente.findOne({
+            where: { ci: datosCliente.ci, esta_activo: true },
+            transaction,
+        });
+
+        if (clienteExistente) {
+            return clienteExistente;
+        }
+
+        // El cliente no existe → validar que al menos tenga el nombre para crearlo
+        if (!datosCliente.nombre) {
+            const err = new Error(
+                `Cliente con CI "${datosCliente.ci}" no encontrado. ` +
+                `Para registrar un cliente nuevo ingrese al menos el nombre.`
+            );
+            err.statusCode = 400;
+            throw err;
+        }
+
+        // Crear el cliente nuevo dentro de la transacción
+        const nuevoCliente = await Cliente.create({
+            ci: datosCliente.ci,
+            tipo_documento: datosCliente.tipo_documento || TIPO_DOCUMENTO_IDENTIDAD.CI,
+            complemento: datosCliente.complemento || null,
+            nombre: datosCliente.nombre,
+            apellido_paterno: datosCliente.apellido_paterno || null,
+            apellido_materno: datosCliente.apellido_materno || null,
+            correo_electronico: datosCliente.correo_electronico || null,
+            fecha_nacimiento: datosCliente.fecha_nacimiento || null,
+            telefono: datosCliente.telefono || null,
+            direccion: datosCliente.direccion || null,
+            genero: datosCliente.genero || null,
+            tipo_cliente: datosCliente.tipo_cliente || 'MIN',
+        }, { transaction });
+
+        return nuevoCliente;
+    }
+
+    // ── Escenario 2: id_cliente (UUID) — retrocompatible ──────────────────────
+    if (id_cliente) {
+        const clientePorId = await Cliente.findByPk(id_cliente, { transaction });
+        if (clientePorId) {
+            return clientePorId;
+        }
+    }
+
+    // ── Escenario 3: Sin cliente → usar cliente genérico ──────────────────────
+    const clienteGenerico = await Cliente.findOne({
+        where: { ci: '000000' },
+        transaction,
+    });
+
+    if (!clienteGenerico) {
+        const err = new Error('Cliente no encontrado y el cliente genérico (CI: 000000) no existe.');
+        err.statusCode = 404;
+        throw err;
+    }
+
+    return clienteGenerico;
+};
+
 const generarNumeroComprobante = async (id_sucursal, transaction) => {
     const fecha = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const prefijo = `TK-${id_sucursal.slice(0, 4).toUpperCase()}-${fecha}`;
-    const count = await Venta.count({
-        where: { numero_comprobante: { [Op.like]: `${prefijo}%` }, id_sucursal },
+
+    // Usar MAX con LOCK en lugar de COUNT para evitar race condition con ventas
+    // concurrentes que calcularían el mismo correlativo antes de insertar.
+    // Se usa el ORM para respetar el tableName exacto definido en el modelo.
+    const registros = await Venta.findAll({
+        attributes: ['numero_comprobante'],
+        where: {
+            numero_comprobante: { [Op.like]: `${prefijo}-%` },
+            id_sucursal,
+        },
+        order: [['numero_comprobante', 'DESC']],
+        limit: 1,
+        lock: transaction.LOCK.UPDATE,
         transaction,
     });
-    return `${prefijo}-${String(count + 1).padStart(4, '0')}`;
+
+    let siguiente = 1;
+    if (registros.length > 0) {
+        const ultimo = registros[0].numero_comprobante;
+        const partes = ultimo.split('-');
+        const ultimoNum = parseInt(partes[partes.length - 1], 10);
+        if (!isNaN(ultimoNum)) siguiente = ultimoNum + 1;
+    }
+
+    return `${prefijo}-${String(siguiente).padStart(4, '0')}`;
 };
 
 const aplicarFIFO = async (registros, unidades, transaction) => {
     let restante = unidades;
+    // Movimientos reales: { id_lote, id_ubicacion, cantidad } por cada lote usado.
+    const movimientos = [];
 
     for (const registro of registros) {
         if (restante <= 0) break;
-        const disponible = parseFloat(registro.cantidad_actual);
+
+        // Recargar desde BD con LOCK para obtener el valor real actual y evitar
+        // race conditions cuando dos ventas concurrentes leen el mismo stock.
+        const registroActual = await StockDistribucion.findByPk(registro.id, {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+        });
+
+        if (!registroActual || parseFloat(registroActual.cantidad_actual) <= 0) continue;
+
+        const disponible = parseFloat(registroActual.cantidad_actual);
         const aDescontar = Math.min(disponible, restante);
 
-        await registro.decrement('cantidad_actual', { by: aDescontar, transaction });
+        await registroActual.decrement('cantidad_actual', { by: aDescontar, transaction });
+
+        movimientos.push({
+            id_lote: registroActual.id_lote,
+            id_ubicacion: registroActual.id_ubicacion,
+            cantidad: aDescontar,
+        });
 
         restante -= aDescontar;
     }
@@ -56,6 +165,8 @@ const aplicarFIFO = async (registros, unidades, transaction) => {
         err.statusCode = 422;
         throw err;
     }
+
+    return movimientos;
 };
 
 const getStockDisponible = async (id_producto, id_sucursal, transaction) => {
@@ -79,7 +190,7 @@ const getStockDisponible = async (id_producto, id_sucursal, transaction) => {
         ],
         order: [[{ model: Lote, as: 'lote' }, 'fecha_ingreso', 'ASC']],
         transaction,
-        lock: true,
+        lock: transaction.LOCK.UPDATE,
     });
 
     const total = registros.reduce((acc, r) => acc + parseFloat(r.cantidad_actual), 0);
@@ -229,10 +340,11 @@ const validarYEnriquecerItems = async (items, id_sucursal, transaction) => {
 };
 
 export const crearVenta = async ({
-    id_sucursal, id_sesion_caja, id_usuario, id_cliente,
+    id_sucursal, id_sesion_caja, id_usuario, name_user, id_cliente,
+    cliente: datosCliente,
     items, tipo_descuento_global, valor_descuento_global = 0,
     pagos, monto_pagado, notas,
-    facturar = false, datos_facturacion = null,
+    facturar = false,
 }) => {
     const empleado = await Empleado.findOne({ where: { usuario_id: id_usuario } });
     if (!empleado) {
@@ -251,22 +363,16 @@ export const crearVenta = async ({
         throw err;
     }
 
-    let cliente = null;
-    if (id_cliente) {
-        cliente = await Cliente.findByPk(id_cliente);
-    }
-
-    if (!cliente) {
-        cliente = await Cliente.findOne({ where: { ci: '000000' } });
-        if (!cliente) {
-            const err = new Error('Cliente no encontrado y el cliente genérico (CI: 000000) no existe.');
-            err.statusCode = 404;
-            throw err;
-        }
-        id_cliente = cliente.id;
-    }
+    let clienteResuelto = null;
 
     const ventaCreada = await sequelize.transaction(async (t) => {
+
+        // ── Resolver cliente dentro de la transacción ─────────────────────────
+        clienteResuelto = await resolverCliente({
+            cliente: datosCliente,
+            id_cliente,
+            transaction: t,
+        });
 
         const itemsEnriquecidos = await validarYEnriquecerItems(items, id_sucursal, t);
         const subtotal = itemsEnriquecidos.reduce((acc, i) => acc + i.subtotal, 0);
@@ -294,7 +400,7 @@ export const crearVenta = async ({
             id_sucursal,
             id_sesion_caja,
             id_empleado,
-            id_cliente,
+            id_cliente: clienteResuelto.id,
             subtotal: subtotal.toFixed(2),
             tipo_descuento_global: tipo_descuento_global || null,
             valor_descuento_global,
@@ -304,7 +410,6 @@ export const crearVenta = async ({
             cambio_entregado: cambio_entregado.toFixed(2),
             notas: notas || null,
             estado_facturacion: facturar ? 'PENDIENTE' : 'NO_APLICA',
-            datos_facturacion_cliente: facturar ? datos_facturacion : null,
         }, { transaction: t });
 
         await DetalleVenta.bulkCreate(
@@ -323,9 +428,10 @@ export const crearVenta = async ({
         );
 
         await PagoVenta.bulkCreate(
-            pagos.map((p) => ({
+            pagos.map((p, idx) => ({
                 id_venta: venta.id,
                 metodo_pago: p.metodo_pago,
+                orden: idx,
                 monto: parseFloat(p.monto).toFixed(2),
                 referencia: p.referencia || null
             })),
@@ -333,33 +439,40 @@ export const crearVenta = async ({
         );
 
         for (const item of itemsEnriquecidos) {
-            await aplicarFIFO(item._registrosFIFO, item._unidades_base, t);
+            // aplicarFIFO retorna los movimientos reales (lote + ubicacion + cantidad)
+            // que efectivamente se descontaron de la BD.
+            const movimientosFIFO = await aplicarFIFO(item._registrosFIFO, item._unidades_base, t);
 
             if (item._productoSerie) {
                 await item._productoSerie.update({ estado: 'VENDIDO' }, { transaction: t });
             }
 
-            await KardexMovimiento.create({
-                id_lote: item._id_lote,
-                tipo_movimiento: 'VENTA',
-                cantidad: item._unidades_base,
-                id_ubicacion_origen: item._id_ubicacion,
-                id_ubicacion_destino: null,
-                id_usuario,
-                observacion: `Venta ${numero_comprobante}`,
-            }, { transaction: t });
+            // Registrar un movimiento en el Kardex por cada lote real descontado.
+            await KardexMovimiento.bulkCreate(
+                movimientosFIFO.map((mov) => ({
+                    id_lote: mov.id_lote,
+                    tipo_movimiento: 'VENTA',
+                    cantidad: mov.cantidad,
+                    id_ubicacion_origen: mov.id_ubicacion,
+                    id_ubicacion_destino: null,
+                    id_usuario,
+                    observacion: `Venta ${numero_comprobante}`,
+                })),
+                { transaction: t }
+            );
         }
 
         return venta;
     });
 
+    // ── Puntos de lealtad ─────────────────────────────────────────────────────
     try {
-        if (cliente && cliente.ci !== '000000') {
+        if (clienteResuelto && clienteResuelto.ci !== '000000') {
             const totalVenta = parseFloat(ventaCreada.total);
             const puntosGanados = Math.floor(totalVenta / 50);
 
             if (puntosGanados > 0) {
-                await cliente.increment('puntos', { by: puntosGanados });
+                await clienteResuelto.increment('puntos', { by: puntosGanados });
             }
         }
     } catch (e) {
@@ -369,7 +482,7 @@ export const crearVenta = async ({
     // ── Facturación (fuera de la transacción DB) ──────────────────────────────
     let resultadoFacturacion = null;
     if (facturar) {
-        resultadoFacturacion = await emitirFactura(ventaCreada.id, id_usuario);
+        resultadoFacturacion = await emitirFactura(ventaCreada.id, name_user);
     }
 
     const ventaCompleta = await getVentaById(ventaCreada.id);
@@ -522,15 +635,15 @@ export const getVentaById = async (id) => {
                         model: DetalleDevolucion,
                         as: 'detalles',
                         include: [
-                            { 
-                                model: Producto, 
-                                as: 'producto_original', 
+                            {
+                                model: Producto,
+                                as: 'producto_original',
                                 attributes: ['id', 'nombre_comercial', 'codigo_barras'],
                                 include: [{ model: UnidadMedida, as: 'unidad_medida', attributes: ['id', 'nombre', 'abreviatura'] }]
                             },
-                            { 
-                                model: Producto, 
-                                as: 'producto_nuevo', 
+                            {
+                                model: Producto,
+                                as: 'producto_nuevo',
                                 attributes: ['id', 'nombre_comercial', 'codigo_barras'],
                                 include: [{ model: UnidadMedida, as: 'unidad_medida', attributes: ['id', 'nombre', 'abreviatura'] }]
                             },
@@ -550,11 +663,11 @@ export const getVentaById = async (id) => {
     }
 
     const isCancelled = !v.esta_activo;
-    
+
     let net = parseFloat(v.total);
     let retAmt = 0;
     let exchDiff = 0;
-    
+
     // Mapear los detalles originales de la venta
     let detallesVenta = v.detalles.map(d => ({
         id: d.id,
@@ -573,7 +686,7 @@ export const getVentaById = async (id) => {
             if (dev.tipo === 'DEVOLUCION') {
                 retAmt += parseFloat(dev.monto_devuelto);
                 net -= parseFloat(dev.monto_devuelto);
-                
+
                 dev.detalles.forEach(dd => {
                     // Restar del original para no mostrar duplicados
                     const origIndex = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
@@ -584,7 +697,7 @@ export const getVentaById = async (id) => {
                             detallesVenta.splice(origIndex, 1);
                         }
                     }
-                    
+
                     detallesVenta.push({
                         id: dd.id + '-ret',
                         producto: dd.producto_original,
@@ -599,7 +712,7 @@ export const getVentaById = async (id) => {
             } else if (dev.tipo === 'CAMBIO') {
                 exchDiff += parseFloat(dev.monto_diferencia);
                 net += parseFloat(dev.monto_diferencia);
-                
+
                 dev.detalles.forEach(dd => {
                     // Restar del original para no mostrar duplicados
                     const origIndex = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
@@ -623,7 +736,7 @@ export const getVentaById = async (id) => {
                         referencia_comprobante: dev.numero_devolucion,
                         notas: `Cambiado por: ${dd.producto_nuevo ? dd.producto_nuevo.nombre_comercial : 'Otro'}`
                     });
-                    
+
                     // Producto nuevo que se lleva el cliente
                     if (dd.id_producto_nuevo) {
                         detallesVenta.push({
@@ -723,6 +836,12 @@ export const findAllVentas = async (query, userContext = {}) => {
         }
     ];
 
+    if (query.metodo_pago) {
+        where.id = {
+            [Op.in]: sequelize.literal(`(SELECT "id_venta" FROM "PagosVenta" WHERE "metodo_pago" = ${sequelize.escape(query.metodo_pago)})`)
+        };
+    }
+
     const [{ rows: ventasList, count: total }, allVentasForSum] = await Promise.all([
         Venta.findAndCountAll({
             where,
@@ -751,9 +870,12 @@ export const findAllVentas = async (query, userContext = {}) => {
     ]);
 
     let totalMontoVentas = 0;
+    let cantidad_ventas_registradas = 0;
+    let cantidad_ventas_anuladas = 0;
+    let total_monto_registradas = 0;
+    let total_monto_anuladas = 0;
+
     allVentasForSum.forEach(v => {
-        if (!v.esta_activo) return; // Si está anulada, el neto es 0
-        
         let net = parseFloat(v.total);
         if (v.devoluciones) {
             v.devoluciones.forEach(dev => {
@@ -761,8 +883,17 @@ export const findAllVentas = async (query, userContext = {}) => {
                 else if (dev.tipo === 'CAMBIO') net += parseFloat(dev.monto_diferencia);
             });
         }
-        totalMontoVentas += net;
+
+        if (v.esta_activo) {
+            cantidad_ventas_registradas++;
+            total_monto_registradas += net;
+        } else {
+            cantidad_ventas_anuladas++;
+            total_monto_anuladas += parseFloat(v.total);
+        }
     });
+
+    totalMontoVentas = total_monto_registradas;
 
     const ventas = ventasList.map(v => {
         const isCancelled = !v.esta_activo;
@@ -783,7 +914,7 @@ export const findAllVentas = async (query, userContext = {}) => {
                 }
             });
         }
-
+        // mi observacion
         return {
             id: v.id,
             numero_comprobante: v.numero_comprobante,
@@ -809,6 +940,12 @@ export const findAllVentas = async (query, userContext = {}) => {
         ventas,
         total,
         totalMontoVentas,
+        widgets: {
+            cantidad_ventas_registradas,
+            cantidad_ventas_anuladas,
+            total_monto_registradas,
+            total_monto_anuladas
+        },
         page,
         perPage,
         totalPages: Math.ceil(total / perPage)
@@ -829,6 +966,8 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
     const resumen = {
         cantidad_ventas: 0,
         total_efectivo: 0, total_qr: 0, total_tarjeta: 0,
+        // Total por cada método de pago del SIAT (efectivo neto de cambio)
+        totales_por_metodo: Object.fromEntries(METODOS_PAGO_VALIDOS.map((m) => [m, 0])),
         total_descuentos: 0, gran_total: 0,
         cantidad_anuladas: 0,
         // Devoluciones y cambios
@@ -847,26 +986,22 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
         const total = parseFloat(v.total);
         resumen.gran_total += total;
         resumen.total_descuentos += parseFloat(v.monto_descuento_global || 0);
-        
-        let efectivo = 0;
-        let qr = 0;
-        let tarjeta = 0;
-        
+
         if (v.pagos) {
             v.pagos.forEach(p => {
-                const monto = parseFloat(p.monto);
-                if (p.metodo_pago === 'EFECTIVO') efectivo += monto;
-                else if (p.metodo_pago === 'QR') qr += monto;
-                else if (p.metodo_pago === 'TARJETA') tarjeta += monto;
+                if (p.metodo_pago in resumen.totales_por_metodo) {
+                    resumen.totales_por_metodo[p.metodo_pago] += parseFloat(p.monto);
+                }
             });
         }
-        
-        efectivo -= parseFloat(v.cambio_entregado || 0);
 
-        resumen.total_efectivo += efectivo;
-        resumen.total_qr += qr;
-        resumen.total_tarjeta += tarjeta;
+        resumen.totales_por_metodo.EFECTIVO -= parseFloat(v.cambio_entregado || 0);
     });
+
+    // Campos legados (compatibilidad con el frontend)
+    resumen.total_efectivo = resumen.totales_por_metodo.EFECTIVO;
+    resumen.total_qr = resumen.totales_por_metodo.QR;
+    resumen.total_tarjeta = resumen.totales_por_metodo.TARJETA;
 
     // Incluir devoluciones/cambios de esta sesión
     try {

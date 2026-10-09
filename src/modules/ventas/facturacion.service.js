@@ -1,6 +1,7 @@
 import axios from 'axios';
 import db from '../../database/index.js';
 import config from '../../config/index.js';
+import { TIPO_DOCUMENTO_IDENTIDAD, METODO_PAGO_SIAT } from '../../constants/business.constants.js';
 
 const {
     Venta,
@@ -10,79 +11,64 @@ const {
     UnidadMedida,
     PagoVenta,
     Cliente,
-    Usuario,
     Factura,
 } = db;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mapeo de métodos de pago internos → código SIN
-// ─────────────────────────────────────────────────────────────────────────────
-const METODO_PAGO_SIN = {
-    EFECTIVO: 1,
-    TARJETA: 2,
-    TRANSFERENCIA: 4,
-    VALE: 4,
-    QR: 7,
-    CHEQUE: 3,
-    OTRO: 1, // fallback
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Genera un número de factura correlativo (autoincremental por el máximo existente)
+// Genera un número de factura correlativo (autoincremental por el máximo en Facturas)
 // ─────────────────────────────────────────────────────────────────────────────
 const generarNumeroFactura = async () => {
-    const ultima = await Venta.max('numero_factura');
+    const ultima = await Factura.max('numero_factura');
     return (ultima || 0) + 1;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Obtiene el código de método de pago SIN a partir de los pagos de la venta
-// Usa el método de pago con mayor monto como el principal
+// Obtiene el código SIAT del método de pago: usa el primer pago del listado
+// enviado en la venta (los pagos llegan ordenados por `orden`)
 // ─────────────────────────────────────────────────────────────────────────────
 const obtenerCodigoMetodoPago = (pagos) => {
-    if (!pagos || pagos.length === 0) return 1;
-
-    // Si hay un solo pago, usar ese
-    if (pagos.length === 1) {
-        return METODO_PAGO_SIN[pagos[0].metodo_pago] || 1;
-    }
-
-    // Si hay varios, usar el de mayor monto
-    const pagoPrincipal = pagos.reduce((prev, curr) =>
-        parseFloat(curr.monto) > parseFloat(prev.monto) ? curr : prev
-    );
-    return METODO_PAGO_SIN[pagoPrincipal.metodo_pago] || 1;
+    const primerPago = pagos?.[0];
+    return METODO_PAGO_SIAT[primerPago?.metodo_pago] || METODO_PAGO_SIAT.EFECTIVO;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PRINCIPAL: Emitir factura para una venta existente
 // ─────────────────────────────────────────────────────────────────────────────
-export const emitirFactura = async (idVenta, id_usuario) => {
+// El proveedor SIAT acepta como máximo 20 caracteres en el campo `usuario`.
+const MAX_LONGITUD_USUARIO = 20;
+
+export const emitirFactura = async (idVenta, nameUser) => {
     const { apiUrl, apiToken, codigoDocumentoSector, leyenda } = config.facturacion;
 
-    // Obtener el name_user del usuario en sesión
-    let usuario = config.facturacion.usuario; // fallback al .env
-    if (id_usuario) {
-        const usuarioDb = await Usuario.findByPk(id_usuario, { attributes: ['name_user'] });
-        if (usuarioDb) usuario = usuarioDb.name_user;
-    }
+    // Obtener o crear el registro de Factura asociado
+    const [factura] = await Factura.findOrCreate({
+        where: { id_venta: idVenta },
+        defaults: { estado: 'PENDIENTE' },
+    });
 
+    // Validar configuración de credenciales del servicio de facturación
     if (!apiUrl || !apiToken) {
-        // Upsert simple de Factura en error si no hay config
-        const [facturaError] = await Factura.findOrCreate({
-            where: { id_venta: idVenta },
-            defaults: { estado: 'ERROR', errores_facturacion: 'Facturación no configurada: falta FACTURACION_API_URL o FACTURACION_API_TOKEN.' }
+        await factura.update({
+            estado: 'ERROR',
+            errores_facturacion: 'Facturación no configurada: falta FACTURACION_API_URL o FACTURACION_API_TOKEN.',
         });
-        if (!facturaError.isNewRecord) {
-            await facturaError.update({ estado: 'ERROR', errores_facturacion: 'Facturación no configurada.' });
-        }
-        console.error('[Facturación] No configurada. Faltan variables de entorno.');
-        return null;
+        console.warn('[Facturación] No configurada. Faltan variables de entorno.');
+        return {
+            success: false,
+            error: 'Facturación no configurada en el servidor (faltan variables de entorno).',
+        };
     }
 
-    // 1. Obtener la venta completa con sus relaciones
+    // name_user del usuario en sesión (req.user), recortado al límite del SIAT
+    const usuario = (nameUser || config.facturacion.usuario || '').slice(0, MAX_LONGITUD_USUARIO);
+
+    // 1. Obtener la venta completa con Cliente, Pagos y Detalles
     const venta = await Venta.findByPk(idVenta, {
         include: [
+            {
+                model: Cliente,
+                as: 'cliente',
+            },
             {
                 model: PagoVenta,
                 as: 'pagos',
@@ -102,23 +88,22 @@ export const emitirFactura = async (idVenta, id_usuario) => {
                 ],
             },
         ],
+        order: [[{ model: PagoVenta, as: 'pagos' }, 'orden', 'ASC']],
     });
 
     if (!venta) {
         throw Object.assign(new Error('Venta no encontrada para facturar.'), { statusCode: 404 });
     }
 
-    // 2. Usar los datos de facturación guardados o los recibidos
-    const datos = datosFacturacion || venta.datos_facturacion_cliente;
-    if (!datos) {
-        await venta.update({
-            estado_facturacion: 'ERROR',
-            errores_facturacion: 'No se encontraron datos de facturación del cliente.',
-        });
-        throw Object.assign(new Error('Datos de facturación del cliente no disponibles.'), { statusCode: 400 });
-    }
+    // 2. Extraer datos fiscales del cliente
+    const cliente = venta.cliente;
+    const razonSocial = cliente?.nombreCompleto || 'SIN NOMBRE';
+    const numeroDocumento = String(cliente?.ci || '0');
+    // Código tipo documento SIAT: 1=CI, 2=CEX, 3=PAS, 4=OD, 5=NIT
+    const tipoDocumento = cliente?.tipo_documento || TIPO_DOCUMENTO_IDENTIDAD.CI;
+    const complemento = cliente?.complemento || null;
 
-    // 3. Generar número de factura
+    // 3. Generar número correlativo de factura
     const numeroFactura = await generarNumeroFactura();
 
     // 4. Calcular montos
@@ -130,18 +115,18 @@ export const emitirFactura = async (idVenta, id_usuario) => {
     const codigoMetodoPago = obtenerCodigoMetodoPago(venta.pagos);
 
     // 6. Armar el detalle mapeando cada item
-    const detalle = venta.detalles.map((det) => {
-        const producto = det.producto;
-        const categoria = producto.categoria;
-        const unidadMedida = producto.unidad_medida;
+    const detalle = (venta.detalles || []).map((det) => {
+        const producto = det.producto || {};
+        const categoria = producto.categoria || {};
+        const unidadMedida = producto.unidad_medida || {};
 
         return {
-            actividadEconomica: categoria.siat_codigo_actividad,
-            codigoProductoSin: categoria.siat_codigo_producto,
-            codigoProducto: producto.codigo_producto || producto.codigo_barras || producto.id,
-            descripcion: producto.nombre_comercial,
+            actividadEconomica: categoria.siat_codigo_actividad || '',
+            codigoProductoSin: categoria.siat_codigo_producto || '',
+            codigoProducto: producto.codigo_barras || producto.id,
+            descripcion: producto.nombre_comercial || 'Producto',
             cantidad: parseFloat(det.cantidad),
-            unidadMedida: unidadMedida.codigo_fact,
+            unidadMedida: unidadMedida.codigo_fact || '58',
             precioUnitario: parseFloat(det.precio_unitario),
             montoDescuento: parseFloat(det.monto_descuento || 0),
             subTotal: parseFloat(det.subtotal),
@@ -153,33 +138,33 @@ export const emitirFactura = async (idVenta, id_usuario) => {
         numeroFactura,
         nombreRazonSocial: razonSocial,
         codigoTipoDocumentoIdentidad: tipoDocumento,
-        numeroDocumento: numeroDocumento,
-        complemento: null,
+        numeroDocumento,
+        complemento,
         codigoCliente: numeroDocumento,
         codigoMetodoPago,
         montoTotal,
         montoTotalSujetoIva,
         descuentoAdicional,
         leyenda,
-        usuario: usuario || config.facturacion.usuario,
+        usuario,
         codigoDocumentoSector,
-        email: cliente.correo_electronico || null,
+        email: cliente?.correo_electronico || null,
         detalle,
     };
 
-    // 8. Llamar al proveedor
+    // 8. Llamar al proveedor SIAT
     try {
         console.log(`[Facturación] Emitiendo factura #${numeroFactura} para venta ${venta.numero_comprobante}...`);
 
-        const respuesta = await axios.post(apiUrl, payloadProveedor, {
+        const respuesta = await axios.post(apiUrl + '/factura/insert', payloadProveedor, {
             headers: {
                 'Authorization': `Bearer ${apiToken}`,
                 'Content-Type': 'application/json',
             },
-            timeout: 30000, // 30 segundos
+            timeout: 80000, // 80 segundos
         });
 
-        // 9. Éxito → Actualizar la venta
+        // 9. Éxito → Actualizar Factura
         const resData = respuesta.data.data || {};
         const cufFinal = resData.cuf || null;
         const urlFinal = resData.urlSiat || resData.urlPdf || null;
@@ -200,12 +185,12 @@ export const emitirFactura = async (idVenta, id_usuario) => {
 
         return {
             success: true,
-            numeroFactura: numeroFactura,
+            numeroFactura,
             cuf: cufFinal,
             urlPdf: urlFinal,
         };
     } catch (error) {
-        // 10. Error → Marcar la venta pero NO lanzar excepción (la venta ya está guardada)
+        // 10. Error → Guardar detalle del error en Factura sin tirar excepción que aborte la venta
         const mensajeErrorRaw = error.response?.data?.mensaje
             || error.response?.data?.message
             || error.response?.data?.error
@@ -233,6 +218,6 @@ export const emitirFactura = async (idVenta, id_usuario) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Reintentar facturación de una venta con estado ERROR o PENDIENTE
 // ─────────────────────────────────────────────────────────────────────────────
-export const reintentarFactura = async (idVenta, id_usuario) => {
-    return emitirFactura(idVenta, id_usuario);
+export const reintentarFactura = async (idVenta, nameUser) => {
+    return emitirFactura(idVenta, nameUser);
 };

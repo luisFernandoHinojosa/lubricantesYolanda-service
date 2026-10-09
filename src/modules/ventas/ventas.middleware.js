@@ -1,4 +1,6 @@
 import db from '../../database/index.js';
+import { clienteVentaSchema } from '../clientes/clientes.schema.js';
+import { METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
 
 const { SesionCaja } = db;
 
@@ -42,7 +44,7 @@ export const requireSesionAbierta = async (req, res, next) => {
 // ─────────────────────────────────────────────────────────────────────────────
 export const validateVenta = (req, res, next) => {
     const {
-        id_sesion_caja, id_cliente, items,
+        id_sesion_caja, id_cliente, cliente, items,
         pagos,
         tipo_descuento_global, valor_descuento_global,
         facturar,
@@ -53,8 +55,22 @@ export const validateVenta = (req, res, next) => {
     // ── Campos raíz obligatorios ──────────────────────────────────────────────
     if (!id_sesion_caja) errores.push('id_sesion_caja es requerido.');
 
+    // ── Validar datos del cliente (si se envía el objeto `cliente`) ────────────
+    if (cliente !== undefined && cliente !== null) {
+        if (typeof cliente !== 'object' || Array.isArray(cliente)) {
+            errores.push('cliente debe ser un objeto con al menos el campo "ci".');
+        } else {
+            const result = clienteVentaSchema.safeParse(cliente);
+            if (!result.success) {
+                result.error.errors.forEach((e) => {
+                    errores.push(`cliente.${e.path.join('.')}: ${e.message}`);
+                });
+            }
+        }
+    }
+
     // ── Métodos de pago ────────────────────────────────────────────────────────
-    const metodosValidos = ['EFECTIVO', 'QR', 'TARJETA', 'TRANSFERENCIA', 'CHEQUE', 'OTRO'];
+    const metodosValidos = METODOS_PAGO_VALIDOS;
     if (!Array.isArray(pagos) || pagos.length === 0) {
         errores.push('pagos debe ser un array con al menos un método de pago.');
     } else {
