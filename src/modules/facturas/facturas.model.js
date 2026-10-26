@@ -23,9 +23,12 @@ export default (sequelize) => {
             defaultValue: 'PENDIENTE',
             allowNull: false,
         },
+        // Correlativo asignado por la secuencia "Facturas_numero_factura_seq"
+        // (ver src/scripts/migrate_numero_factura.js). Se reutiliza al reintentar.
         numero_factura: {
             type: DataTypes.INTEGER,
-            allowNull: true,
+            allowNull: false,
+            unique: true,
         },
         cuf: {
             type: DataTypes.STRING(200),
@@ -35,6 +38,36 @@ export default (sequelize) => {
         url_factura_pdf: {
             type: DataTypes.TEXT,
             allowNull: true,
+            comment: 'PDF de la factura generado por el proveedor (urlFactura)',
+        },
+        url_siat: {
+            type: DataTypes.TEXT,
+            allowNull: true,
+            comment: 'Enlace de verificación del SIAT, el mismo del QR (urlSiat)',
+        },
+        estado_siat: {
+            type: DataTypes.STRING(30),
+            allowNull: true,
+            comment: 'Respuesta del SIAT (siatRespuesta): VALIDA, OBSERVADA, etc.',
+        },
+        cufd: {
+            type: DataTypes.STRING(200),
+            allowNull: true,
+            comment: 'Código Único de Facturación Diario con el que se emitió',
+        },
+        codigo_control: {
+            type: DataTypes.STRING(50),
+            allowNull: true,
+        },
+        codigo_ambiente: {
+            type: DataTypes.SMALLINT,
+            allowNull: true,
+            comment: '1 = producción, 2 = pruebas (piloto)',
+        },
+        fecha_emision: {
+            type: DataTypes.DATE,
+            allowNull: true,
+            comment: 'Instante en que el SIAT validó la factura',
         },
         xml_factura: {
             type: DataTypes.TEXT,

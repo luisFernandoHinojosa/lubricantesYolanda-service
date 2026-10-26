@@ -1,6 +1,5 @@
 import db from '../../database/index.js';
-import { clienteVentaSchema } from '../clientes/clientes.schema.js';
-import { METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
+import { ForbiddenError } from '../../errors/AppError.js';
 
 const { SesionCaja } = db;
 
@@ -13,10 +12,7 @@ export const requireSesionAbierta = async (req, res, next) => {
         const { id: id_usuario, id_sucursal } = req.user;
         const empleado = await db.Empleado.findOne({ where: { usuario_id: id_usuario } });
         if (!empleado) {
-            return res.status(403).json({
-                status: 403,
-                message: 'El usuario no tiene un empleado asociado.',
-            });
+            throw new ForbiddenError('El usuario no tiene un empleado asociado.');
         }
         const id_empleado = empleado.id;
 
@@ -25,10 +21,7 @@ export const requireSesionAbierta = async (req, res, next) => {
         });
 
         if (!sesion) {
-            return res.status(403).json({
-                status: 403,
-                message: 'No hay sesión de caja abierta. Realice la apertura de caja primero.',
-            });
+            throw new ForbiddenError('No hay sesión de caja abierta. Realice la apertura de caja primero.');
         }
 
         // Disponible en el resto del pipeline
@@ -37,127 +30,6 @@ export const requireSesionAbierta = async (req, res, next) => {
     } catch (err) {
         next(err);
     }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MIDDLEWARE: Validar el cuerpo de una nueva venta.
-// ─────────────────────────────────────────────────────────────────────────────
-export const validateVenta = (req, res, next) => {
-    const {
-        id_sesion_caja, id_cliente, cliente, items,
-        pagos,
-        tipo_descuento_global, valor_descuento_global,
-        facturar,
-    } = req.body;
-
-    const errores = [];
-
-    // ── Campos raíz obligatorios ──────────────────────────────────────────────
-    if (!id_sesion_caja) errores.push('id_sesion_caja es requerido.');
-
-    // ── Validar datos del cliente (si se envía el objeto `cliente`) ────────────
-    if (cliente !== undefined && cliente !== null) {
-        if (typeof cliente !== 'object' || Array.isArray(cliente)) {
-            errores.push('cliente debe ser un objeto con al menos el campo "ci".');
-        } else {
-            const result = clienteVentaSchema.safeParse(cliente);
-            if (!result.success) {
-                result.error.errors.forEach((e) => {
-                    errores.push(`cliente.${e.path.join('.')}: ${e.message}`);
-                });
-            }
-        }
-    }
-
-    // ── Métodos de pago ────────────────────────────────────────────────────────
-    const metodosValidos = METODOS_PAGO_VALIDOS;
-    if (!Array.isArray(pagos) || pagos.length === 0) {
-        errores.push('pagos debe ser un array con al menos un método de pago.');
-    } else {
-        pagos.forEach((pago, idx) => {
-            const base = `pagos[${idx}]`;
-            if (!pago.metodo_pago) errores.push(`${base}.metodo_pago es requerido.`);
-            else if (!metodosValidos.includes(pago.metodo_pago)) {
-                errores.push(`${base}.metodo_pago debe ser uno de: ${metodosValidos.join(', ')}.`);
-            }
-            if (pago.monto === undefined || pago.monto === null) {
-                errores.push(`${base}.monto es requerido.`);
-            } else if (isNaN(parseFloat(pago.monto)) || parseFloat(pago.monto) <= 0) {
-                errores.push(`${base}.monto debe ser un número mayor a 0.`);
-            }
-        });
-    }
-
-    // ── Items ─────────────────────────────────────────────────────────────────
-    if (!Array.isArray(items) || items.length === 0) {
-        errores.push('items debe ser un array con al menos un producto.');
-    } else {
-        // Detectar items duplicados (mismo id_producto + id_presentacion)
-        const claves = items.map(
-            (i) => `${i.id_producto}::${i.id_presentacion || 'unidad'}`
-        );
-        const clavesUnicas = new Set(claves);
-        if (clavesUnicas.size !== claves.length) {
-            errores.push('items contiene productos duplicados. Agrupe en un solo ítem con mayor cantidad.');
-        }
-
-        items.forEach((item, idx) => {
-            const base = `items[${idx}]`;
-
-            if (!item.id_producto)
-                errores.push(`${base}.id_producto es requerido.`);
-
-            if (!item.cantidad || isNaN(parseFloat(item.cantidad)) || parseFloat(item.cantidad) <= 0)
-                errores.push(`${base}.cantidad debe ser un número mayor a 0.`);
-
-            // precio_unitario NO es obligatorio en el body — el service lo obtiene de BD.
-            // Si se envía, solo validamos que no sea un número extraño.
-            if (item.precio_unitario !== undefined) {
-                if (isNaN(parseFloat(item.precio_unitario)) || parseFloat(item.precio_unitario) < 0)
-                    errores.push(`${base}.precio_unitario inválido (el sistema usará el precio del lote).`);
-            }
-
-            if (item.monto_descuento !== undefined) {
-                if (isNaN(parseFloat(item.monto_descuento)) || parseFloat(item.monto_descuento) < 0)
-                    errores.push(`${base}.monto_descuento no puede ser negativo.`);
-            }
-
-            // numero_serie: si se envía debe ser un string no vacío.
-            // La validación de si el producto realmente requiere serie la hace el service
-            // consultando Producto.maneja_serie en BD.
-            if (item.numero_serie !== undefined && item.numero_serie !== null) {
-                if (typeof item.numero_serie !== 'string' || !item.numero_serie.trim()) {
-                    errores.push(`${base}.numero_serie debe ser un texto no vacío si se proporciona.`);
-                }
-            }
-        });
-    }
-
-    // ── Descuento global ──────────────────────────────────────────────────────
-    if (tipo_descuento_global !== undefined && tipo_descuento_global !== null) {
-        const tiposValidos = ['PORCENTAJE', 'FIJO', 'NINGUNO'];
-        if (!tiposValidos.includes(tipo_descuento_global)) {
-            errores.push(`tipo_descuento_global debe ser: ${tiposValidos.join(' | ')}.`);
-        }
-        if (valor_descuento_global === undefined || valor_descuento_global === null) {
-            errores.push('valor_descuento_global es requerido cuando se especifica tipo_descuento_global.');
-        } else {
-            if (isNaN(parseFloat(valor_descuento_global)) || parseFloat(valor_descuento_global) < 0)
-                errores.push('valor_descuento_global debe ser un número >= 0.');
-            if (tipo_descuento_global === 'PORCENTAJE' && parseFloat(valor_descuento_global) > 100)
-                errores.push('El porcentaje de descuento no puede superar 100%.');
-        }
-    }
-
-    if (errores.length > 0) {
-        return res.status(400).json({
-            status: 400,
-            mensaje: 'Error de validación en los datos de la venta.',
-            errores,
-        });
-    }
-
-    next();
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

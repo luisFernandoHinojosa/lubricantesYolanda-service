@@ -69,7 +69,7 @@ export default (sequelize) => {
       },
       telefono: {
         type: DataTypes.STRING(50),
-        allowNull: true,
+        allowNull: false,
         defaultValue: null,
       },
       direccion: {

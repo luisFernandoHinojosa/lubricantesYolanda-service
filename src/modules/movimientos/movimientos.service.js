@@ -1,9 +1,6 @@
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc.js';
 import { Op } from 'sequelize';
-
-dayjs.extend(utc);
 import db from '../../database/index.js';
+import { inicioDelDia, finDelDia } from '../../utils/fechas.js';
 import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
 import { MOVIMIENTO_CONFIG } from '../../common/applyFilters.js';
 import { MOVIMIENTO_EXCLUDED } from '../../common/attributeExclude.js';
@@ -80,9 +77,9 @@ export const findMovimientosByDateRange = async (params) => {
     const { startDate, endDate, page, perPage, search } = params;
     const offset = (page - 1) * perPage;
 
-    // Use UTC to avoid timezone shifts and cover the full day
-    const start = dayjs.utc(startDate).startOf('day').toDate();
-    const end = dayjs.utc(endDate).endOf('day').toDate();
+    // Días completos en hora de Bolivia (no en UTC)
+    const start = inicioDelDia(startDate);
+    const end = finDelDia(endDate);
 
     const where = {
         esta_activo: true,

@@ -31,3 +31,9 @@ export const METODO_PAGO_SIAT = {
 };
 
 export const METODOS_PAGO_VALIDOS = Object.keys(METODO_PAGO_SIAT);
+
+// CI del cliente genérico ("Público General") al que se asignan las ventas sin cliente
+export const CI_CLIENTE_GENERICO = '000000';
+
+// Correo que se asigna al cliente cuando no se envía uno (la factura del SIAT lo usa)
+export const CORREO_CLIENTE_POR_DEFECTO = 'lubricantesyolanda@gmail.com';

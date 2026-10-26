@@ -60,6 +60,19 @@ export default (sequelize) => {
             allowNull: false,
             defaultValue: 0
         },
+        // Recargo por emitir factura: porcentaje que ingresa el cajero (puede ser 0).
+        // Solo es informativo para el negocio: al SIAT se envía el total sin este recargo.
+        porcentaje_recargo_iva: {
+            type: DataTypes.DECIMAL(5, 2),
+            allowNull: false,
+            defaultValue: 0
+        },
+        monto_recargo_iva: {
+            type: DataTypes.DECIMAL(10, 2),
+            allowNull: false,
+            defaultValue: 0
+        },
+        // Lo que paga el cliente: subtotal - descuento global + recargo por factura
         total: {
             type: DataTypes.DECIMAL(10, 2),
             allowNull: false

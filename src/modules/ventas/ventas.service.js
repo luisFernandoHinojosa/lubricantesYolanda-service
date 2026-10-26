@@ -2,15 +2,25 @@ import { Op } from 'sequelize';
 import db from '../../database/index.js';
 import { VENTA_CONFIG } from '../../common/applyFilters.js';
 import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
-import config from '../../config/index.js';
-import { emitirFactura } from './facturacion.service.js';
-import { TIPO_DOCUMENTO_IDENTIDAD, METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
+import { emitirFactura, siguienteNumeroFactura } from './facturacion.service.js';
+import { METODOS_PAGO_VALIDOS, CI_CLIENTE_GENERICO } from '../../constants/business.constants.js';
+import {
+    NotFoundError,
+    ConflictError,
+    ForbiddenError,
+    ValidationError,
+    BusinessRuleError,
+} from '../../errors/AppError.js';
+import { clienteRepository } from '../clientes/clientes.repository.js';
+import { clienteNuevoVentaSchema } from '../clientes/clientes.schema.js';
+import { eventEmitter } from '../../services/event.service.js';
+import { fechaCompacta, inicioDelDia, finDelDia } from '../../utils/fechas.js';
+import { ventaListadoDTO, ventaDetalleDTO } from './ventas.dto.js';
 
 const {
     Venta,
     DetalleVenta,
     PagoVenta,
-    SesionCaja,
     Producto,
     Presentacion,
     Cliente,
@@ -21,7 +31,6 @@ const {
     KardexMovimiento,
     sequelize,
     Empleado,
-    Usuario,
     UnidadMedida,
     Sucursal,
     Devolucion,
@@ -29,172 +38,174 @@ const {
     Factura,
 } = db;
 
+// Cada MONTO_POR_PUNTO bolivianos de venta otorgan 1 punto de lealtad
+const MONTO_POR_PUNTO = 50;
+
+// Tolerancia para comparar cantidades decimales (evita errores de coma flotante)
+const EPSILON = 1e-9;
+
+const redondear2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+const sumar = (lista, fn) => lista.reduce((acc, x) => acc + fn(x), 0);
+
 // ─── Resolución de cliente ───────────────────────────────────────────────────
-// Maneja 3 escenarios:
-//   1. Objeto `cliente` con CI → buscar por CI, crear si no existe
-//   2. `id_cliente` (UUID) → buscar por PK (retrocompatible)
-//   3. Ninguno → usar cliente genérico CI: 000000
+// El cliente se identifica solo por CI/NIT:
+//   1. Sin CI (o con el CI genérico) → cliente genérico CI: 000000
+//   2. CI registrado → ese cliente
+//   3. CI no registrado → se valida que lleguen los datos requeridos y se crea
 // ─────────────────────────────────────────────────────────────────────────────
-const resolverCliente = async ({ cliente: datosCliente, id_cliente, transaction }) => {
-    // ── Escenario 1: Objeto `cliente` con CI ──────────────────────────────────
-    if (datosCliente && datosCliente.ci) {
-        const clienteExistente = await Cliente.findOne({
-            where: { ci: datosCliente.ci, esta_activo: true },
-            transaction,
-        });
-
-        if (clienteExistente) {
-            return clienteExistente;
-        }
-
-        // El cliente no existe → validar que al menos tenga el nombre para crearlo
-        if (!datosCliente.nombre) {
-            const err = new Error(
-                `Cliente con CI "${datosCliente.ci}" no encontrado. ` +
-                `Para registrar un cliente nuevo ingrese al menos el nombre.`
-            );
-            err.statusCode = 400;
-            throw err;
-        }
-
-        // Crear el cliente nuevo dentro de la transacción
-        const nuevoCliente = await Cliente.create({
-            ci: datosCliente.ci,
-            tipo_documento: datosCliente.tipo_documento || TIPO_DOCUMENTO_IDENTIDAD.CI,
-            complemento: datosCliente.complemento || null,
-            nombre: datosCliente.nombre,
-            apellido_paterno: datosCliente.apellido_paterno || null,
-            apellido_materno: datosCliente.apellido_materno || null,
-            correo_electronico: datosCliente.correo_electronico || null,
-            fecha_nacimiento: datosCliente.fecha_nacimiento || null,
-            telefono: datosCliente.telefono || null,
-            direccion: datosCliente.direccion || null,
-            genero: datosCliente.genero || null,
-            tipo_cliente: datosCliente.tipo_cliente || 'MIN',
-        }, { transaction });
-
-        return nuevoCliente;
+const getClienteGenerico = async (transaction) => {
+    const cliente = await Cliente.findOne({ where: { ci: CI_CLIENTE_GENERICO }, transaction });
+    if (!cliente) {
+        throw new NotFoundError(
+            'Cliente genérico',
+            `El cliente genérico (CI: ${CI_CLIENTE_GENERICO}) no existe. Regístrelo antes de vender sin cliente.`
+        );
     }
-
-    // ── Escenario 2: id_cliente (UUID) — retrocompatible ──────────────────────
-    if (id_cliente) {
-        const clientePorId = await Cliente.findByPk(id_cliente, { transaction });
-        if (clientePorId) {
-            return clientePorId;
-        }
-    }
-
-    // ── Escenario 3: Sin cliente → usar cliente genérico ──────────────────────
-    const clienteGenerico = await Cliente.findOne({
-        where: { ci: '000000' },
-        transaction,
-    });
-
-    if (!clienteGenerico) {
-        const err = new Error('Cliente no encontrado y el cliente genérico (CI: 000000) no existe.');
-        err.statusCode = 404;
-        throw err;
-    }
-
-    return clienteGenerico;
+    return cliente;
 };
 
-const generarNumeroComprobante = async (id_sucursal, transaction) => {
-    const fecha = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const prefijo = `TK-${id_sucursal.slice(0, 4).toUpperCase()}-${fecha}`;
+const resolverCliente = async (datosCliente, transaction) => {
+    const ci = datosCliente?.ci?.trim();
 
-    // Usar MAX con LOCK en lugar de COUNT para evitar race condition con ventas
-    // concurrentes que calcularían el mismo correlativo antes de insertar.
-    // Se usa el ORM para respetar el tableName exacto definido en el modelo.
-    const registros = await Venta.findAll({
-        attributes: ['numero_comprobante'],
-        where: {
-            numero_comprobante: { [Op.like]: `${prefijo}-%` },
-            id_sucursal,
-        },
-        order: [['numero_comprobante', 'DESC']],
-        limit: 1,
-        lock: transaction.LOCK.UPDATE,
+    if (!ci || ci === CI_CLIENTE_GENERICO) {
+        return { cliente: await getClienteGenerico(transaction), esNuevo: false };
+    }
+
+    const existente = await clienteRepository.findByCi(ci, { transaction });
+    if (existente) {
+        return { cliente: existente, esNuevo: false };
+    }
+
+    // Los puntos nunca se aceptan desde la venta
+    const { puntos, ...datos } = datosCliente;
+    const parsed = clienteNuevoVentaSchema.safeParse({ ...datos, ci });
+    if (!parsed.success) {
+        throw new ValidationError(
+            parsed.error.issues.map((issue) => ({
+                field: ['body', 'cliente', ...issue.path].join('.'),
+                message: issue.message,
+            })),
+            `El cliente con CI ${ci} no está registrado: complete nombre y teléfono para registrarlo.`
+        );
+    }
+
+    const nuevo = await clienteRepository.create(parsed.data, { transaction });
+    return { cliente: nuevo, esNuevo: true };
+};
+
+// ─── Correlativo del comprobante ─────────────────────────────────────────────
+const generarNumeroComprobante = async (id_sucursal, transaction) => {
+    const prefijo = `TK-${id_sucursal.slice(0, 4).toUpperCase()}-${fechaCompacta()}`;
+
+    // Serializa la generación del correlativo por prefijo hasta el fin de la transacción.
+    // A diferencia de un FOR UPDATE sobre la última venta, también protege la primera
+    // venta del día, cuando todavía no hay filas que bloquear.
+    await sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:prefijo))', {
+        replacements: { prefijo },
         transaction,
     });
 
-    let siguiente = 1;
-    if (registros.length > 0) {
-        const ultimo = registros[0].numero_comprobante;
-        const partes = ultimo.split('-');
-        const ultimoNum = parseInt(partes[partes.length - 1], 10);
-        if (!isNaN(ultimoNum)) siguiente = ultimoNum + 1;
-    }
+    // Sin filtrar por sucursal: si dos sucursales comparten el prefijo, comparten el
+    // contador y el numero_comprobante (único) no se repite.
+    const ultimo = await Venta.max('numero_comprobante', {
+        where: { numero_comprobante: { [Op.like]: `${prefijo}-%` } },
+        transaction,
+    });
+
+    const ultimoNum = ultimo ? parseInt(ultimo.split('-').pop(), 10) : 0;
+    const siguiente = isNaN(ultimoNum) ? 1 : ultimoNum + 1;
 
     return `${prefijo}-${String(siguiente).padStart(4, '0')}`;
 };
 
+// ─── Stock ───────────────────────────────────────────────────────────────────
+// Descuenta `unidades` de los registros (ya bloqueados y en orden FIFO) y retorna
+// los movimientos reales: { id_lote, id_ubicacion, cantidad } por cada lote usado.
 const aplicarFIFO = async (registros, unidades, transaction) => {
     let restante = unidades;
-    // Movimientos reales: { id_lote, id_ubicacion, cantidad } por cada lote usado.
     const movimientos = [];
 
     for (const registro of registros) {
-        if (restante <= 0) break;
+        if (restante <= EPSILON) break;
 
-        // Recargar desde BD con LOCK para obtener el valor real actual y evitar
-        // race conditions cuando dos ventas concurrentes leen el mismo stock.
-        const registroActual = await StockDistribucion.findByPk(registro.id, {
-            transaction,
-            lock: transaction.LOCK.UPDATE,
-        });
+        const disponible = parseFloat(registro.cantidad_actual);
+        if (disponible <= 0) continue;
 
-        if (!registroActual || parseFloat(registroActual.cantidad_actual) <= 0) continue;
-
-        const disponible = parseFloat(registroActual.cantidad_actual);
         const aDescontar = Math.min(disponible, restante);
 
-        await registroActual.decrement('cantidad_actual', { by: aDescontar, transaction });
+        await registro.decrement('cantidad_actual', { by: aDescontar, transaction });
+        // La fila sigue bloqueada por esta transacción: se actualiza el valor en memoria
+        // para que otro ítem del mismo producto vea el stock que queda.
+        registro.setDataValue('cantidad_actual', disponible - aDescontar);
 
         movimientos.push({
-            id_lote: registroActual.id_lote,
-            id_ubicacion: registroActual.id_ubicacion,
+            id_lote: registro.id_lote,
+            id_ubicacion: registro.id_ubicacion,
             cantidad: aDescontar,
         });
 
         restante -= aDescontar;
     }
 
-    if (restante > 0) {
-        const err = new Error('Stock insuficiente durante el descuento FIFO.');
-        err.statusCode = 422;
-        throw err;
+    if (restante > EPSILON) {
+        throw new BusinessRuleError('Stock insuficiente durante el descuento FIFO.', 'STOCK_INSUFICIENTE');
     }
 
     return movimientos;
 };
 
-const getStockDisponible = async (id_producto, id_sucursal, transaction) => {
+// Stock disponible en la sucursal de todos los productos, en una sola consulta.
+// Retorna Map<id_producto, registros[]> en orden FIFO (lote más antiguo primero).
+const cargarStockFIFO = async (idsProducto, id_sucursal, transaction) => {
     const registros = await StockDistribucion.findAll({
         where: { cantidad_actual: { [Op.gt]: 0 } },
         include: [
             {
                 model: Lote,
                 as: 'lote',
-                where: { id_producto },
-                attributes: ['id', 'codigo_lote', 'fecha_ingreso'],
+                where: { id_producto: idsProducto },
+                attributes: ['id', 'id_producto', 'fecha_ingreso'],
                 required: true,
             },
             {
                 model: Ubicacion,
                 as: 'ubicacion',
                 where: { id_sucursal },
-                attributes: ['id', 'nombre'],
+                attributes: [],
                 required: true,
             },
         ],
-        order: [[{ model: Lote, as: 'lote' }, 'fecha_ingreso', 'ASC']],
+        order: [[{ model: Lote, as: 'lote' }, 'fecha_ingreso', 'ASC'], ['id', 'ASC']],
+        // OF: bloquea solo las filas de stock; sin OF también se bloquearían Lote y Ubicacion
+        lock: { level: transaction.LOCK.UPDATE, of: StockDistribucion },
         transaction,
-        lock: transaction.LOCK.UPDATE,
     });
 
-    const total = registros.reduce((acc, r) => acc + parseFloat(r.cantidad_actual), 0);
-    return { total, registros };
+    const porProducto = new Map(idsProducto.map((id) => [id, []]));
+    for (const registro of registros) {
+        porProducto.get(registro.lote.id_producto).push(registro);
+    }
+    return porProducto;
+};
+
+// Series disponibles, en una sola consulta. Retorna Map<'numero_serie::id_producto', ProductoSerie>.
+const cargarSeriesDisponibles = async (numerosSerie, transaction) => {
+    if (numerosSerie.length === 0) return new Map();
+
+    const series = await ProductoSerie.findAll({
+        where: { numero_serie: numerosSerie, estado: 'DISPONIBLE' },
+        include: [{
+            model: Lote,
+            as: 'lote',
+            attributes: ['id_producto'],
+            required: true,
+        }],
+        lock: { level: transaction.LOCK.UPDATE, of: ProductoSerie },
+        transaction,
+    });
+
+    return new Map(series.map((s) => [`${s.numero_serie}::${s.lote.id_producto}`, s]));
 };
 
 const reingresarStock = async (id_producto, id_sucursal, unidades, transaction) => {
@@ -217,13 +228,11 @@ const reingresarStock = async (id_producto, id_sucursal, unidades, transaction) 
         ],
         order: [[{ model: Lote, as: 'lote' }, 'fecha_ingreso', 'DESC']],
         transaction,
-        lock: true,
+        lock: { level: transaction.LOCK.UPDATE, of: StockDistribucion },
     });
 
     if (!registro) {
-        const err = new Error(`No se encontró un registro de stock para reingresar el producto.`);
-        err.statusCode = 422;
-        throw err;
+        throw new BusinessRuleError('No se encontró un registro de stock para reingresar el producto.');
     }
 
     await registro.increment('cantidad_actual', { by: unidades, transaction });
@@ -234,163 +243,217 @@ const reingresarStock = async (id_producto, id_sucursal, unidades, transaction) 
     };
 };
 
+// ─── Validación de ítems ─────────────────────────────────────────────────────
+// Carga productos, presentaciones, series y stock en lote (una consulta por tipo),
+// calcula precios y subtotales, y valida el stock sumando lo requerido por producto.
 const validarYEnriquecerItems = async (items, id_sucursal, transaction) => {
-    const itemsEnriquecidos = [];
+    const idsProducto = [...new Set(items.map((i) => i.id_producto))];
+    const idsPresentacion = [...new Set(items.map((i) => i.id_presentacion).filter(Boolean))];
 
-    for (const item of items) {
-        const producto = await Producto.findByPk(item.id_producto, { transaction });
+    const productos = await Producto.findAll({
+        where: { id: idsProducto },
+        attributes: ['id', 'nombre_comercial', 'codigo_barras', 'precio_venta'],
+        include: [{ model: UnidadMedida, as: 'unidad_medida', attributes: ['id', 'nombre', 'abreviatura'] }],
+        transaction,
+    });
+    const productosPorId = new Map(productos.map((p) => [p.id, p]));
+
+    const presentaciones = idsPresentacion.length > 0
+        ? await Presentacion.findAll({
+            where: { id: idsPresentacion },
+            attributes: ['id', 'id_producto', 'nombre', 'factor_conversion', 'precio_especial'],
+            transaction,
+        })
+        : [];
+    const presentacionesPorId = new Map(presentaciones.map((p) => [p.id, p]));
+
+    const itemsEnriquecidos = items.map((item) => {
+        const producto = productosPorId.get(item.id_producto);
         if (!producto) {
-            const err = new Error(`Producto ID "${item.id_producto}" no encontrado.`);
-            err.statusCode = 404;
-            throw err;
+            throw new NotFoundError('Producto', `Producto ID "${item.id_producto}" no encontrado.`);
         }
 
         let factor_aplicado = 1;
         let precio_unitario;
+        let presentacion = null;
 
         if (item.id_presentacion) {
-            const presentacion = await Presentacion.findOne({
-                where: { id: item.id_presentacion, id_producto: item.id_producto },
-                transaction,
-            });
-            if (!presentacion) {
-                const err = new Error(`Presentación inválida para "${producto.nombre_comercial}".`);
-                err.statusCode = 404;
-                throw err;
+            presentacion = presentacionesPorId.get(item.id_presentacion);
+            if (!presentacion || presentacion.id_producto !== producto.id) {
+                throw new NotFoundError(
+                    'Presentación',
+                    `Presentación inválida para "${producto.nombre_comercial}".`
+                );
+            }
+            if (presentacion.precio_especial === null || presentacion.precio_especial === undefined) {
+                throw new BusinessRuleError(
+                    `La presentación "${presentacion.nombre}" de "${producto.nombre_comercial}" no tiene precio definido.`
+                );
             }
             factor_aplicado = parseFloat(presentacion.factor_conversion);
             precio_unitario = parseFloat(presentacion.precio_especial);
-
         } else {
             if (producto.precio_venta === null || producto.precio_venta === undefined) {
-                const err = new Error(`"${producto.nombre_comercial}" no tiene precio de venta general definido.`);
-                err.statusCode = 422;
-                throw err;
+                throw new BusinessRuleError(
+                    `"${producto.nombre_comercial}" no tiene precio de venta general definido.`
+                );
             }
             precio_unitario = parseFloat(producto.precio_venta);
         }
 
-        let productoSerieRef = null;
-        if (producto.maneja_serie) {
-            if (!item.numero_serie?.trim()) {
-                const err = new Error(`"${producto.nombre_comercial}" requiere número de serie.`);
-                err.statusCode = 422;
-                throw err;
-            }
-            productoSerieRef = await ProductoSerie.findOne({
-                where: { numero_serie: item.numero_serie.trim(), estado: 'DISPONIBLE' },
-                include: [{
-                    model: Lote,
-                    as: 'lote',
-                    where: { id_producto: producto.id },
-                    required: true,
-                }],
-                transaction,
-                lock: true,
-            });
-            if (!productoSerieRef) {
-                const err = new Error(
-                    `Serie "${item.numero_serie}" no disponible para "${producto.nombre_comercial}".`
-                );
-                err.statusCode = 422;
-                throw err;
-            }
+        const numero_serie = item.numero_serie?.trim() || null;
+        if (producto.maneja_serie && !numero_serie) {
+            throw new BusinessRuleError(`"${producto.nombre_comercial}" requiere número de serie.`);
         }
 
-        const unidades_base = parseFloat(item.cantidad) * factor_aplicado;
-        const { total: stockDisponible, registros } = await getStockDisponible(
-            item.id_producto,
-            id_sucursal,
-            transaction
-        );
+        const cantidad = parseFloat(item.cantidad);
+        const monto_descuento = redondear2(parseFloat(item.monto_descuento || 0));
+        const importe = redondear2(precio_unitario * cantidad);
 
-        if (stockDisponible < unidades_base) {
-            const err = new Error(
-                `Stock insuficiente para "${producto.nombre_comercial}". ` +
-                `Disponible: ${stockDisponible.toFixed(2)}, requerido: ${unidades_base.toFixed(2)}.`
+        // El SIAT valida subTotal = cantidad × precioUnitario − montoDescuento por ítem,
+        // así que el descuento (en Bs) no puede superar el importe del ítem.
+        if (monto_descuento > importe + EPSILON) {
+            throw new BusinessRuleError(
+                `El descuento de "${producto.nombre_comercial}" (Bs ${monto_descuento.toFixed(2)}) ` +
+                `no puede superar su importe (Bs ${importe.toFixed(2)}).`,
+                'DESCUENTO_EXCEDE_IMPORTE'
             );
-            err.statusCode = 422;
-            throw err;
         }
 
-        const monto_descuento = parseFloat(item.monto_descuento || 0);
-        const subtotal_item = Math.max(
-            0,
-            precio_unitario * parseFloat(item.cantidad) - monto_descuento
-        );
-
-        itemsEnriquecidos.push({
-            id_producto: item.id_producto,
-            id_presentacion: item.id_presentacion || null,
-            cantidad: parseFloat(item.cantidad),
+        return {
+            producto,
+            presentacion,
+            cantidad,
             factor_aplicado,
             precio_unitario,
             monto_descuento,
-            subtotal: subtotal_item,
-            numero_serie: item.numero_serie?.trim() || null,
-            _registrosFIFO: registros,
-            _unidades_base: unidades_base,
-            _id_lote: registros[0]?.id_lote || null,
-            _id_ubicacion: registros[0]?.id_ubicacion || null,
-            _productoSerie: productoSerieRef,
-        });
+            subtotal: redondear2(importe - monto_descuento),
+            numero_serie,
+            unidades_base: cantidad * factor_aplicado,
+            productoSerie: null,
+            registrosFIFO: [],
+        };
+    });
+
+    // ── Series ────────────────────────────────────────────────────────────────
+    const itemsConSerie = itemsEnriquecidos.filter((i) => i.producto.maneja_serie);
+    const seriesDisponibles = await cargarSeriesDisponibles(
+        itemsConSerie.map((i) => i.numero_serie),
+        transaction
+    );
+    for (const item of itemsConSerie) {
+        item.productoSerie = seriesDisponibles.get(`${item.numero_serie}::${item.producto.id}`);
+        if (!item.productoSerie) {
+            throw new BusinessRuleError(
+                `Serie "${item.numero_serie}" no disponible para "${item.producto.nombre_comercial}".`
+            );
+        }
+    }
+
+    // ── Stock: se valida contra lo requerido por producto (unidad + presentaciones) ──
+    const stockPorProducto = await cargarStockFIFO(idsProducto, id_sucursal, transaction);
+
+    const requeridoPorProducto = new Map();
+    for (const item of itemsEnriquecidos) {
+        const id = item.producto.id;
+        requeridoPorProducto.set(id, (requeridoPorProducto.get(id) || 0) + item.unidades_base);
+    }
+
+    for (const [id_producto, requerido] of requeridoPorProducto) {
+        const disponible = sumar(stockPorProducto.get(id_producto), (r) => parseFloat(r.cantidad_actual));
+        if (disponible + EPSILON < requerido) {
+            const { nombre_comercial } = productosPorId.get(id_producto);
+            throw new BusinessRuleError(
+                `Stock insuficiente para "${nombre_comercial}". ` +
+                `Disponible: ${disponible.toFixed(2)}, requerido: ${requerido.toFixed(2)}.`,
+                'STOCK_INSUFICIENTE'
+            );
+        }
+    }
+
+    for (const item of itemsEnriquecidos) {
+        item.registrosFIFO = stockPorProducto.get(item.producto.id);
     }
 
     return itemsEnriquecidos;
 };
 
+// ─── Crear venta ─────────────────────────────────────────────────────────────
+// `sesion` es la sesión de caja abierta del cajero (req.sesionCaja, del middleware
+// requireSesionAbierta); de ella salen la sucursal y el empleado.
 export const crearVenta = async ({
-    id_sucursal, id_sesion_caja, id_usuario, name_user, id_cliente,
+    sesion, id_usuario, name_user,
+    id_sesion_caja,
     cliente: datosCliente,
     items, tipo_descuento_global, valor_descuento_global = 0,
-    pagos, monto_pagado, notas,
+    pagos, notas,
     facturar = false,
+    porcentaje_recargo_iva = 0,
 }) => {
-    const empleado = await Empleado.findOne({ where: { usuario_id: id_usuario } });
-    if (!empleado) {
-        const err = new Error('El usuario no tiene un empleado asociado.');
-        err.statusCode = 400;
-        throw err;
-    }
-    const id_empleado = empleado.id;
-    const sesion = await SesionCaja.findOne({
-        where: { id: id_sesion_caja, id_sucursal, id_empleado, estado: 'ABIERTA' },
-    });
-
-    if (!sesion) {
-        const err = new Error('No existe sesión de caja activa.');
-        err.statusCode = 403;
-        throw err;
+    if (id_sesion_caja && id_sesion_caja !== sesion.id) {
+        throw new ForbiddenError('La sesión de caja indicada no es la sesión abierta del cajero.');
     }
 
-    let clienteResuelto = null;
+    // También se valida en crearVentaSchema; se repite porque proformas llama a este servicio directamente
+    if (facturar && (!datosCliente?.ci || datosCliente.ci === CI_CLIENTE_GENERICO)) {
+        throw new BusinessRuleError(
+            'Para facturar debe enviar el CI/NIT del cliente.',
+            'CLIENTE_REQUERIDO_PARA_FACTURAR'
+        );
+    }
 
-    const ventaCreada = await sequelize.transaction(async (t) => {
+    const porcentajeRecargo = facturar ? parseFloat(porcentaje_recargo_iva) || 0 : 0;
+    if (porcentajeRecargo < 0 || porcentajeRecargo > 100) {
+        throw new BusinessRuleError('El porcentaje de recargo por factura debe estar entre 0 y 100.');
+    }
 
-        // ── Resolver cliente dentro de la transacción ─────────────────────────
-        clienteResuelto = await resolverCliente({
-            cliente: datosCliente,
-            id_cliente,
-            transaction: t,
-        });
+    const { id: idSesion, id_sucursal, id_empleado } = sesion;
+    const tipoDescuento = tipo_descuento_global || 'NINGUNO';
+    const monto_pagado = redondear2(sumar(pagos, (p) => parseFloat(p.monto)));
+    const pagado_no_efectivo = redondear2(
+        sumar(pagos.filter((p) => p.metodo_pago !== 'EFECTIVO'), (p) => parseFloat(p.monto))
+    );
+
+    let clienteCreado = null;
+
+    const venta = await sequelize.transaction(async (t) => {
+        const { cliente, esNuevo } = await resolverCliente(datosCliente, t);
+        if (esNuevo) clienteCreado = cliente;
 
         const itemsEnriquecidos = await validarYEnriquecerItems(items, id_sucursal, t);
-        const subtotal = itemsEnriquecidos.reduce((acc, i) => acc + i.subtotal, 0);
+        const subtotal = redondear2(sumar(itemsEnriquecidos, (i) => i.subtotal));
 
         let monto_descuento_global = 0;
-        if (tipo_descuento_global === 'PORCENTAJE') {
-            monto_descuento_global = (subtotal * parseFloat(valor_descuento_global)) / 100;
-        } else if (tipo_descuento_global === 'FIJO') {
-            monto_descuento_global = parseFloat(valor_descuento_global);
+        if (tipoDescuento === 'PORCENTAJE') {
+            monto_descuento_global = redondear2((subtotal * parseFloat(valor_descuento_global)) / 100);
+        } else if (tipoDescuento === 'FIJO') {
+            monto_descuento_global = redondear2(parseFloat(valor_descuento_global));
         }
 
-        const total = Math.max(0, subtotal - monto_descuento_global);
-        const cambio_entregado = parseFloat(monto_pagado) - total;
+        // El descuento global se aplica sobre la suma de los ítems (va al SIAT como descuentoAdicional)
+        if (monto_descuento_global > subtotal + EPSILON) {
+            throw new BusinessRuleError(
+                `El descuento global (Bs ${monto_descuento_global.toFixed(2)}) ` +
+                `no puede superar la suma de los productos (Bs ${subtotal.toFixed(2)}).`,
+                'DESCUENTO_EXCEDE_TOTAL'
+            );
+        }
+
+        // Monto que se factura al SIAT; el recargo se cobra encima y no va en la factura
+        const totalSinRecargo = redondear2(subtotal - monto_descuento_global);
+        const monto_recargo_iva = redondear2((totalSinRecargo * porcentajeRecargo) / 100);
+        const total = redondear2(totalSinRecargo + monto_recargo_iva);
+        const cambio_entregado = redondear2(monto_pagado - total);
 
         if (cambio_entregado < 0) {
-            const err = new Error('El monto pagado no cubre el total de la venta.');
-            err.statusCode = 422;
-            throw err;
+            throw new BusinessRuleError('El monto pagado no cubre el total de la venta.', 'PAGO_INSUFICIENTE');
+        }
+
+        if (pagado_no_efectivo > total) {
+            throw new BusinessRuleError(
+                'Los pagos que no son en efectivo no pueden superar el total: el cambio solo se entrega en efectivo.',
+                'PAGO_EXCEDE_TOTAL'
+            );
         }
 
         const numero_comprobante = await generarNumeroComprobante(id_sucursal, t);
@@ -398,25 +461,26 @@ export const crearVenta = async ({
         const venta = await Venta.create({
             numero_comprobante,
             id_sucursal,
-            id_sesion_caja,
+            id_sesion_caja: idSesion,
             id_empleado,
-            id_cliente: clienteResuelto.id,
+            id_cliente: cliente.id,
             subtotal: subtotal.toFixed(2),
-            tipo_descuento_global: tipo_descuento_global || null,
+            tipo_descuento_global: tipoDescuento,
             valor_descuento_global,
             monto_descuento_global: monto_descuento_global.toFixed(2),
+            porcentaje_recargo_iva: porcentajeRecargo.toFixed(2),
+            monto_recargo_iva: monto_recargo_iva.toFixed(2),
             total: total.toFixed(2),
-            monto_pagado: parseFloat(monto_pagado).toFixed(2),
+            monto_pagado: monto_pagado.toFixed(2),
             cambio_entregado: cambio_entregado.toFixed(2),
             notas: notas || null,
-            estado_facturacion: facturar ? 'PENDIENTE' : 'NO_APLICA',
         }, { transaction: t });
 
         await DetalleVenta.bulkCreate(
             itemsEnriquecidos.map((item) => ({
                 id_venta: venta.id,
-                id_producto: item.id_producto,
-                id_presentacion: item.id_presentacion,
+                id_producto: item.producto.id,
+                id_presentacion: item.presentacion?.id || null,
                 cantidad: item.cantidad,
                 factor_aplicado: item.factor_aplicado,
                 precio_unitario: item.precio_unitario,
@@ -433,73 +497,92 @@ export const crearVenta = async ({
                 metodo_pago: p.metodo_pago,
                 orden: idx,
                 monto: parseFloat(p.monto).toFixed(2),
-                referencia: p.referencia || null
+                referencia: p.referencia || null,
             })),
             { transaction: t }
         );
 
+        // ── Stock y Kardex: un movimiento por cada lote realmente descontado ──
+        const movimientosKardex = [];
         for (const item of itemsEnriquecidos) {
-            // aplicarFIFO retorna los movimientos reales (lote + ubicacion + cantidad)
-            // que efectivamente se descontaron de la BD.
-            const movimientosFIFO = await aplicarFIFO(item._registrosFIFO, item._unidades_base, t);
+            const movimientos = await aplicarFIFO(item.registrosFIFO, item.unidades_base, t);
+            movimientosKardex.push(...movimientos.map((mov) => ({
+                id_lote: mov.id_lote,
+                tipo_movimiento: 'VENTA',
+                cantidad: mov.cantidad,
+                id_ubicacion_origen: mov.id_ubicacion,
+                id_ubicacion_destino: null,
+                id_usuario,
+                observacion: `Venta ${numero_comprobante}`,
+            })));
+        }
+        await KardexMovimiento.bulkCreate(movimientosKardex, { transaction: t });
 
-            if (item._productoSerie) {
-                await item._productoSerie.update({ estado: 'VENDIDO' }, { transaction: t });
-            }
-
-            // Registrar un movimiento en el Kardex por cada lote real descontado.
-            await KardexMovimiento.bulkCreate(
-                movimientosFIFO.map((mov) => ({
-                    id_lote: mov.id_lote,
-                    tipo_movimiento: 'VENTA',
-                    cantidad: mov.cantidad,
-                    id_ubicacion_origen: mov.id_ubicacion,
-                    id_ubicacion_destino: null,
-                    id_usuario,
-                    observacion: `Venta ${numero_comprobante}`,
-                })),
-                { transaction: t }
+        const idsSeriesVendidas = itemsEnriquecidos
+            .filter((i) => i.productoSerie)
+            .map((i) => i.productoSerie.id);
+        if (idsSeriesVendidas.length > 0) {
+            await ProductoSerie.update(
+                { estado: 'VENDIDO' },
+                { where: { id: idsSeriesVendidas }, transaction: t }
             );
+        }
+
+        // ── Puntos de lealtad (atómico con la venta; el recargo por factura no suma puntos) ──
+        const puntosGanados = cliente.ci !== CI_CLIENTE_GENERICO ? Math.floor(totalSinRecargo / MONTO_POR_PUNTO) : 0;
+        if (puntosGanados > 0) {
+            await Cliente.increment('puntos', {
+                by: puntosGanados,
+                where: { id: cliente.id },
+                transaction: t,
+            });
+        }
+
+        // ── Factura PENDIENTE: último paso, para no consumir números de la secuencia
+        //    si algo anterior falla. Si el proceso se cae antes de emitirla, queda el
+        //    registro PENDIENTE para reintentar.
+        if (facturar) {
+            await Factura.create({
+                id_venta: venta.id,
+                estado: 'PENDIENTE',
+                numero_factura: await siguienteNumeroFactura(t),
+            }, { transaction: t });
         }
 
         return venta;
     });
 
-    // ── Puntos de lealtad ─────────────────────────────────────────────────────
-    try {
-        if (clienteResuelto && clienteResuelto.ci !== '000000') {
-            const totalVenta = parseFloat(ventaCreada.total);
-            const puntosGanados = Math.floor(totalVenta / 50);
-
-            if (puntosGanados > 0) {
-                await clienteResuelto.increment('puntos', { by: puntosGanados });
-            }
-        }
-    } catch (e) {
-        console.error('Error acumulando puntos de lealtad:', e.message);
+    if (clienteCreado) {
+        eventEmitter.emit('cliente.created', {
+            clienteId: clienteCreado.id,
+            ci: clienteCreado.ci,
+            nombre: clienteCreado.nombre,
+        });
     }
 
-    // ── Facturación (fuera de la transacción DB) ──────────────────────────────
+    // ── Facturación (fuera de la transacción DB, la venta ya está registrada) ──
     let resultadoFacturacion = null;
     if (facturar) {
-        resultadoFacturacion = await emitirFactura(ventaCreada.id, name_user);
+        try {
+            resultadoFacturacion = await emitirFactura(venta.id, name_user);
+        } catch (e) {
+            console.error('[Facturación] Error inesperado al emitir la factura:', e.message);
+            resultadoFacturacion = { success: false, error: e.message };
+        }
     }
 
-    const ventaCompleta = await getVentaById(ventaCreada.id);
-    if (resultadoFacturacion) {
-        ventaCompleta.resultado_facturacion = resultadoFacturacion;
-    }
-    return ventaCompleta;
+    // Mismo formato que GET /ventas/:id (incluye la factura ya actualizada)
+    return {
+        ...(await getVentaById(venta.id)),
+        resultado_facturacion: resultadoFacturacion,
+    };
 };
 
 export const anularVenta = async (id_venta, id_usuario) => {
     const empleado = await Empleado.findOne({ where: { usuario_id: id_usuario } });
     if (!empleado) {
-        const err = new Error('El usuario no tiene un empleado asociado.');
-        err.statusCode = 400;
-        throw err;
+        throw new ForbiddenError('El usuario no tiene un empleado asociado.');
     }
-    const id_empleado = empleado.id;
 
     const venta = await Venta.findByPk(id_venta, {
         include: [
@@ -509,15 +592,11 @@ export const anularVenta = async (id_venta, id_usuario) => {
     });
 
     if (!venta) {
-        const err = new Error('Venta no encontrada.');
-        err.statusCode = 404;
-        throw err;
+        throw new NotFoundError('Venta', 'Venta no encontrada.');
     }
 
     if (!venta.esta_activo) {
-        const err = new Error('La venta ya se encuentra anulada.');
-        err.statusCode = 400;
-        throw err;
+        throw new ConflictError('La venta ya se encuentra anulada.');
     }
 
     await sequelize.transaction(async (t) => {
@@ -558,9 +637,9 @@ export const anularVenta = async (id_venta, id_usuario) => {
     // Descontar puntos de lealtad
     try {
         const cliente = venta.cliente;
-        if (cliente && cliente.ci !== '000000') {
+        if (cliente && cliente.ci !== CI_CLIENTE_GENERICO) {
             const totalVenta = parseFloat(venta.total);
-            const puntosADescontar = Math.floor(totalVenta / 50);
+            const puntosADescontar = Math.floor(totalVenta / MONTO_POR_PUNTO);
 
             if (puntosADescontar > 0) {
                 const puntosActuales = parseInt(cliente.puntos || 0);
@@ -595,7 +674,8 @@ export const getVentaById = async (id) => {
             },
             {
                 model: Factura,
-                as: 'factura'
+                as: 'factura',
+                attributes: { exclude: ['xml_factura'] },
             },
             {
                 model: PagoVenta,
@@ -654,187 +734,158 @@ export const getVentaById = async (id) => {
                 ]
             }
         ],
+        order: [
+            [{ model: PagoVenta, as: 'pagos' }, 'orden', 'ASC'],
+            [{ model: Devolucion, as: 'devoluciones' }, 'createdAt', 'ASC'],
+        ],
     });
 
     if (!v) {
-        const err = new Error('Venta no encontrada.');
-        err.statusCode = 404;
-        throw err;
+        throw new NotFoundError('Venta', 'Venta no encontrada.');
     }
 
-    const isCancelled = !v.esta_activo;
+    // Precio neto por unidad de cada línea (con su descuento por ítem). Al devolver, la línea
+    // original baja según la cantidad devuelta; subtotal_devuelto es lo reembolsado (incluye
+    // la parte del descuento global y del recargo) y se muestra en la fila de devolución.
+    const netoUnitarioPorDetalle = new Map(
+        v.detalles.map(d => [d.id, parseFloat(d.subtotal) / parseFloat(d.cantidad)])
+    );
+    const descontarDeLinea = (linea, dd) => {
+        linea.cantidad -= parseFloat(dd.cantidad_devuelta);
+        linea.subtotal = redondear2(linea.subtotal - netoUnitarioPorDetalle.get(dd.id_detalle_venta) * parseFloat(dd.cantidad_devuelta));
+        // Mantiene subtotal = precio_unitario × cantidad − monto_descuento en lo que queda de la línea
+        linea.monto_descuento = redondear2(Math.max(0, linea.precio_unitario * linea.cantidad - linea.subtotal));
+    };
+    const quitarLineaOriginal = (dd) => {
+        const idx = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
+        if (idx === -1) return;
+        descontarDeLinea(detallesVenta[idx], dd);
+        if (detallesVenta[idx].cantidad <= EPSILON) detallesVenta.splice(idx, 1);
+    };
 
-    let net = parseFloat(v.total);
-    let retAmt = 0;
-    let exchDiff = 0;
-
-    // Mapear los detalles originales de la venta
-    let detallesVenta = v.detalles.map(d => ({
+    // Detalles originales de la venta
+    const detallesVenta = v.detalles.map(d => ({
         id: d.id,
         id_original: d.id,
+        movimiento: 'VENTA',
         producto: d.producto,
         presentacion: d.presentacion,
+        numero_serie: d.numero_serie,
         cantidad: parseFloat(d.cantidad),
         precio_unitario: parseFloat(d.precio_unitario),
+        monto_descuento: parseFloat(d.monto_descuento || 0),
         subtotal: parseFloat(d.subtotal),
-        movimiento: 'VENTA',
-        numero_serie: null
     }));
 
-    if (!isCancelled && v.devoluciones) {
-        v.devoluciones.forEach(dev => {
-            if (dev.tipo === 'DEVOLUCION') {
-                retAmt += parseFloat(dev.monto_devuelto);
-                net -= parseFloat(dev.monto_devuelto);
+    // Devoluciones y cambios: se restan de la línea original y se agregan como filas propias
+    if (v.esta_activo) {
+        for (const dev of v.devoluciones || []) {
+            for (const dd of dev.detalles) {
+                quitarLineaOriginal(dd);
 
-                dev.detalles.forEach(dd => {
-                    // Restar del original para no mostrar duplicados
-                    const origIndex = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
-                    if (origIndex !== -1) {
-                        detallesVenta[origIndex].cantidad -= parseFloat(dd.cantidad_devuelta);
-                        detallesVenta[origIndex].subtotal -= parseFloat(dd.subtotal_devuelto);
-                        if (detallesVenta[origIndex].cantidad <= 0) {
-                            detallesVenta.splice(origIndex, 1);
-                        }
-                    }
-
-                    detallesVenta.push({
-                        id: dd.id + '-ret',
-                        producto: dd.producto_original,
-                        presentacion: dd.presentacion_original,
-                        cantidad: parseFloat(dd.cantidad_devuelta),
-                        precio_unitario: parseFloat(dd.precio_original),
-                        subtotal: -parseFloat(dd.subtotal_devuelto),
-                        movimiento: 'DEVOLUCION',
-                        referencia_comprobante: dev.numero_devolucion
-                    });
+                // Producto que devuelve el cliente
+                detallesVenta.push({
+                    id: dd.id + '-ret',
+                    movimiento: 'DEVOLUCION',
+                    producto: dd.producto_original,
+                    presentacion: dd.presentacion_original,
+                    numero_serie: dd.numero_serie_devuelta,
+                    cantidad: parseFloat(dd.cantidad_devuelta),
+                    precio_unitario: parseFloat(dd.precio_original),
+                    monto_descuento: null,
+                    subtotal: -parseFloat(dd.subtotal_devuelto),
+                    referencia_comprobante: dev.numero_devolucion,
+                    notas: dev.tipo === 'CAMBIO'
+                        ? `Cambiado por: ${dd.producto_nuevo ? dd.producto_nuevo.nombre_comercial : 'Otro'}`
+                        : null,
                 });
-            } else if (dev.tipo === 'CAMBIO') {
-                exchDiff += parseFloat(dev.monto_diferencia);
-                net += parseFloat(dev.monto_diferencia);
 
-                dev.detalles.forEach(dd => {
-                    // Restar del original para no mostrar duplicados
-                    const origIndex = detallesVenta.findIndex(d => d.id_original === dd.id_detalle_venta && d.movimiento === 'VENTA');
-                    if (origIndex !== -1) {
-                        detallesVenta[origIndex].cantidad -= parseFloat(dd.cantidad_devuelta);
-                        detallesVenta[origIndex].subtotal -= parseFloat(dd.subtotal_devuelto);
-                        if (detallesVenta[origIndex].cantidad <= 0) {
-                            detallesVenta.splice(origIndex, 1);
-                        }
-                    }
-
-                    // Producto que entra (devuelto por el cliente)
+                // Producto nuevo que se lleva el cliente en un cambio
+                if (dev.tipo === 'CAMBIO' && dd.id_producto_nuevo) {
                     detallesVenta.push({
-                        id: dd.id + '-ret',
-                        producto: dd.producto_original,
-                        presentacion: dd.presentacion_original,
-                        cantidad: parseFloat(dd.cantidad_devuelta),
-                        precio_unitario: parseFloat(dd.precio_original),
-                        subtotal: -parseFloat(dd.subtotal_devuelto),
-                        movimiento: 'DEVOLUCION', // Marcado como DEVOLUCION porque el cliente lo devuelve
+                        id: dd.id + '-new',
+                        movimiento: 'CAMBIO',
+                        producto: dd.producto_nuevo,
+                        presentacion: dd.presentacion_nueva,
+                        numero_serie: dd.numero_serie_nueva,
+                        cantidad: parseFloat(dd.cantidad_nueva),
+                        precio_unitario: parseFloat(dd.precio_nuevo),
+                        monto_descuento: null,
+                        subtotal: parseFloat(dd.subtotal_nuevo),
                         referencia_comprobante: dev.numero_devolucion,
-                        notas: `Cambiado por: ${dd.producto_nuevo ? dd.producto_nuevo.nombre_comercial : 'Otro'}`
+                        notas: `Entregado a cambio de: ${dd.producto_original.nombre_comercial}`,
                     });
-
-                    // Producto nuevo que se lleva el cliente
-                    if (dd.id_producto_nuevo) {
-                        detallesVenta.push({
-                            id: dd.id + '-new',
-                            producto: dd.producto_nuevo,
-                            presentacion: dd.presentacion_nueva,
-                            cantidad: parseFloat(dd.cantidad_nueva),
-                            precio_unitario: parseFloat(dd.precio_nuevo),
-                            subtotal: parseFloat(dd.subtotal_nuevo),
-                            movimiento: 'CAMBIO',
-                            referencia_comprobante: dev.numero_devolucion,
-                            notas: `Entregado a cambio de: ${dd.producto_original.nombre_comercial}`
-                        });
-                    }
-                });
+                }
             }
-        });
+        }
     }
 
+    return ventaDetalleDTO(v, detallesVenta);
+};
+
+// ─── Listado de ventas ───────────────────────────────────────────────────────
+// Solo relaciones 1:1 en el JOIN (cliente, cajero, sucursal, factura): así LIMIT/OFFSET
+// cuentan ventas y no filas repetidas. Pagos y devoluciones van en consultas aparte
+// (`separate: true`).
+const includesListado = () => [
+    { model: Cliente, as: 'cliente', attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno', 'ci'] },
+    { model: Empleado, as: 'cajero', attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno'] },
+    { model: Sucursal, as: 'sucursal', attributes: ['id', 'nombre'] },
+];
+
+// Devoluciones/cambios completados de cada venta, como subconsulta correlacionada
+const sumaDevoluciones = (columna, tipo) => `COALESCE((
+    SELECT SUM(d."${columna}") FROM "Devoluciones" d
+    WHERE d."id_venta_original" = "Venta"."id"
+      AND d."estado" = 'COMPLETADA' AND d."esta_activo" = true AND d."tipo" = '${tipo}'
+), 0)`;
+
+// Totales de todas las ventas del filtro (no solo de la página), calculados en SQL
+const calcularResumenVentas = async (where) => {
+    const activa = '"Venta"."esta_activo" = true';
+    const anulada = '"Venta"."esta_activo" = false';
+    const totalNeto = `"Venta"."total" - ${sumaDevoluciones('monto_devuelto', 'DEVOLUCION')} + ${sumaDevoluciones('monto_diferencia', 'CAMBIO')}`;
+    const facturada = `EXISTS (SELECT 1 FROM "Facturas" f WHERE f."id_venta" = "Venta"."id" AND f."estado" = 'FACTURADA')`;
+
+    const [fila] = await Venta.findAll({
+        where,
+        // Los JOIN 1:1 se necesitan para el filtro `search` ($cliente.nombre$, $cajero.nombre$...)
+        include: includesListado().map((inc) => ({ ...inc, attributes: [] })),
+        attributes: [
+            [sequelize.literal(`COUNT(*) FILTER (WHERE ${activa})`), 'cantidad_registradas'],
+            [sequelize.literal(`COUNT(*) FILTER (WHERE ${anulada})`), 'cantidad_anuladas'],
+            [sequelize.literal(`COALESCE(SUM(${totalNeto}) FILTER (WHERE ${activa}), 0)`), 'total_neto_registradas'],
+            [sequelize.literal(`COALESCE(SUM("Venta"."total") FILTER (WHERE ${anulada}), 0)`), 'total_anuladas'],
+            [sequelize.literal(`COUNT(*) FILTER (WHERE ${activa} AND ${facturada})`), 'cantidad_facturadas'],
+            [sequelize.literal(`COALESCE(SUM("Venta"."monto_recargo_iva") FILTER (WHERE ${activa}), 0)`), 'total_recargo_iva'],
+        ],
+        raw: true,
+    });
+
     return {
-        id: v.id,
-        numero_comprobante: v.numero_comprobante,
-        id_sesion_caja: v.id_sesion_caja,
-        subtotal: v.subtotal,
-        tipo_descuento_global: v.tipo_descuento_global,
-        valor_descuento_global: v.valor_descuento_global,
-        monto_descuento_global: v.monto_descuento_global,
-        total: net.toFixed(2), // Siempre mantener el total de la venta, incluso si fue anulada
-        pagos: v.pagos,
-        monto_pagado: v.monto_pagado,
-        cambio_entregado: v.cambio_entregado,
-        createdAt: v.createdAt,
-        updatedAt: v.updatedAt,
-        cliente: v.cliente,
-        cajero: v.cajero,
-        sucursal: v.sucursal,
-        esta_activo: v.esta_activo,
-        factura: v.factura,
-        // Nuevos atributos de coherencia
-        monto_devuelto: retAmt.toFixed(2),
-        diferencia_cambio: exchDiff.toFixed(2),
-        total_neto: (isCancelled ? 0 : net).toFixed(2),
-        // Array de detalles enriquecido
-        detalles: detallesVenta
+        cantidad_registradas: parseInt(fila.cantidad_registradas, 10),
+        cantidad_anuladas: parseInt(fila.cantidad_anuladas, 10),
+        total_neto_registradas: redondear2(parseFloat(fila.total_neto_registradas)),
+        total_anuladas: redondear2(parseFloat(fila.total_anuladas)),
+        cantidad_facturadas: parseInt(fila.cantidad_facturadas, 10),
+        total_recargo_iva: redondear2(parseFloat(fila.total_recargo_iva)),
     };
 };
 
-export const findAllVentas = async (query, userContext = {}) => {
-    const filters = { ...query, ...userContext };
-    const {
-        where,
-        limit,
-        offset,
-        order,
-        page,
-        perPage
-    } = buildSequelizeQuery(filters, VENTA_CONFIG);
+// `query` ya viene validado por listarVentasSchema
+export const findAllVentas = async (query) => {
+    const { where, limit, offset, order, page, perPage } = buildSequelizeQuery(query, VENTA_CONFIG);
 
     if (query.desde || query.hasta) {
         where.createdAt = {};
+        // inicioDelDia/finDelDia aceptan 'YYYY-MM-DD' o un ISO completo (lo convierten al día de Bolivia)
         if (query.desde) {
-            const desdeStr = (query.desde.includes('T') ? query.desde.split('T')[0] : query.desde).trim();
-            where.createdAt[Op.gte] = `${desdeStr} 00:00:00`;
+            where.createdAt[Op.gte] = inicioDelDia(query.desde);
         }
         if (query.hasta) {
-            const hastaStr = (query.hasta.includes('T') ? query.hasta.split('T')[0] : query.hasta).trim();
-            where.createdAt[Op.lte] = `${hastaStr} 23:59:59.999`;
+            where.createdAt[Op.lte] = finDelDia(query.hasta);
         }
     }
-
-    const includes = [
-        {
-            model: Cliente,
-            as: 'cliente',
-            attributes: ['id', 'nombre', 'apellido_paterno', 'ci']
-        },
-        {
-            model: PagoVenta,
-            as: 'pagos',
-            attributes: ['id', 'metodo_pago', 'monto', 'referencia']
-        },
-        {
-            model: Sucursal,
-            as: 'sucursal',
-            attributes: ['id', 'nombre']
-        },
-        {
-            model: Empleado,
-            as: 'cajero',
-            attributes: ['id', 'nombre', 'apellido_paterno', 'apellido_materno']
-        },
-        {
-            model: Devolucion,
-            as: 'devoluciones',
-            where: { estado: 'COMPLETADA', esta_activo: true },
-            required: false
-        }
-    ];
 
     if (query.metodo_pago) {
         where.id = {
@@ -842,113 +893,49 @@ export const findAllVentas = async (query, userContext = {}) => {
         };
     }
 
-    const [{ rows: ventasList, count: total }, allVentasForSum] = await Promise.all([
+    const [{ rows, count: total }, resumen] = await Promise.all([
         Venta.findAndCountAll({
             where,
             limit,
             offset,
-            order: order || [['createdAt', 'DESC']],
-            subQuery: false,
+            order,
             distinct: true,
-            exclude: ['notas', 'id_sucursal', 'id_empleado', 'id_cliente'],
-            include: includes
-        }),
-        Venta.findAll({
-            where,
-            attributes: ['id', 'total', 'esta_activo'],
+            subQuery: false,
             include: [
-                ...includes.filter(i => i.as !== 'devoluciones').map(inc => ({ ...inc, attributes: [] })),
+                ...includesListado(),
+                {
+                    model: Factura,
+                    as: 'factura',
+                    attributes: ['id', 'estado', 'numero_factura', 'fecha_emision'],
+                    required: false,
+                },
+                {
+                    model: PagoVenta,
+                    as: 'pagos',
+                    attributes: ['id', 'id_venta', 'metodo_pago', 'monto', 'referencia'],
+                    separate: true,
+                    order: [['orden', 'ASC']],
+                },
                 {
                     model: Devolucion,
                     as: 'devoluciones',
+                    attributes: ['id', 'id_venta_original', 'tipo', 'monto_devuelto', 'monto_diferencia'],
                     where: { estado: 'COMPLETADA', esta_activo: true },
                     required: false,
-                    attributes: ['tipo', 'monto_devuelto', 'monto_diferencia']
-                }
-            ]
-        })
+                    separate: true,
+                },
+            ],
+        }),
+        calcularResumenVentas(where),
     ]);
 
-    let totalMontoVentas = 0;
-    let cantidad_ventas_registradas = 0;
-    let cantidad_ventas_anuladas = 0;
-    let total_monto_registradas = 0;
-    let total_monto_anuladas = 0;
-
-    allVentasForSum.forEach(v => {
-        let net = parseFloat(v.total);
-        if (v.devoluciones) {
-            v.devoluciones.forEach(dev => {
-                if (dev.tipo === 'DEVOLUCION') net -= parseFloat(dev.monto_devuelto);
-                else if (dev.tipo === 'CAMBIO') net += parseFloat(dev.monto_diferencia);
-            });
-        }
-
-        if (v.esta_activo) {
-            cantidad_ventas_registradas++;
-            total_monto_registradas += net;
-        } else {
-            cantidad_ventas_anuladas++;
-            total_monto_anuladas += parseFloat(v.total);
-        }
-    });
-
-    totalMontoVentas = total_monto_registradas;
-
-    const ventas = ventasList.map(v => {
-        const isCancelled = !v.esta_activo;
-        const status = isCancelled ? 'CANCELLED' : 'COMPLETED';
-
-        let net = parseFloat(v.total);
-        let retAmt = 0;
-        let exchDiff = 0;
-
-        if (!isCancelled && v.devoluciones) {
-            v.devoluciones.forEach(dev => {
-                if (dev.tipo === 'DEVOLUCION') {
-                    retAmt += parseFloat(dev.monto_devuelto);
-                    net -= parseFloat(dev.monto_devuelto);
-                } else if (dev.tipo === 'CAMBIO') {
-                    exchDiff += parseFloat(dev.monto_diferencia);
-                    net += parseFloat(dev.monto_diferencia);
-                }
-            });
-        }
-        // mi observacion
-        return {
-            id: v.id,
-            numero_comprobante: v.numero_comprobante,
-            id_sesion_caja: v.id_sesion_caja,
-            subtotal: v.subtotal,
-            tipo_descuento_global: v.tipo_descuento_global,
-            valor_descuento_global: v.valor_descuento_global,
-            monto_descuento_global: v.monto_descuento_global,
-            total: net.toFixed(2), // Siempre devuelve el total calculado, incluso si está anulado
-            pagos: v.pagos,
-            monto_pagado: v.monto_pagado,
-            cambio_entregado: v.cambio_entregado,
-            createdAt: v.createdAt,
-            updatedAt: v.updatedAt,
-            cliente: v.cliente,
-            cajero: v.cajero,
-            sucursal: v.sucursal,
-            esta_activo: v.esta_activo
-        };
-    });
-
     return {
-        ventas,
+        ventas: rows.map(ventaListadoDTO),
         total,
-        totalMontoVentas,
-        widgets: {
-            cantidad_ventas_registradas,
-            cantidad_ventas_anuladas,
-            total_monto_registradas,
-            total_monto_anuladas
-        },
         page,
         perPage,
-        totalPages: Math.ceil(total / perPage)
+        totalPages: Math.ceil(total / perPage),
+        resumen,
     };
 };
 
