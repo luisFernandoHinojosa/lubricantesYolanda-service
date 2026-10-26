@@ -2,6 +2,7 @@ import { Op } from 'sequelize';
 import db from '../../database/index.js';
 import { DEVOLUCION_CONFIG } from '../../common/applyFilters.js';
 import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
+import { fechaCompacta } from '../../utils/fechas.js';
 
 const {
     Devolucion,
@@ -26,7 +27,7 @@ const {
 // Generar número de comprobante para devoluciones
 // ─────────────────────────────────────────────────────────────────────────────
 const generarNumeroDevolucion = async (id_sucursal, transaction) => {
-    const fecha = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const fecha = fechaCompacta();
     const prefijo = `DEV-${id_sucursal.slice(0, 4).toUpperCase()}-${fecha}`;
     const count = await Devolucion.count({
         where: { numero_devolucion: { [Op.like]: `${prefijo}%` }, id_sucursal },
@@ -44,6 +45,60 @@ const getCantidadYaDevuelta = async (id_detalle_venta, transaction) => {
         transaction,
     });
     return parseFloat(result || 0);
+};
+
+const redondear2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lo que el cliente pagó realmente por cada línea de la venta: reparte el total
+// (ya con descuento global y recargo por factura) en proporción al subtotal de
+// cada línea (ya con su descuento en Bs). La última línea absorbe el redondeo,
+// así la suma de las líneas es exactamente el total cobrado.
+// Retorna Map<id_detalle_venta, monto>.
+// ─────────────────────────────────────────────────────────────────────────────
+const calcularPagadoPorLinea = (venta) => {
+    const detalles = [...venta.detalles].sort((a, b) => a.id.localeCompare(b.id));
+    const subtotalVenta = detalles.reduce((acc, d) => acc + parseFloat(d.subtotal), 0);
+    const totalVenta = parseFloat(venta.total);
+
+    const pagadoPorLinea = new Map();
+    let acumulado = 0;
+    detalles.forEach((d, idx) => {
+        const monto = idx === detalles.length - 1
+            ? redondear2(totalVenta - acumulado)
+            : subtotalVenta > 0 ? redondear2((parseFloat(d.subtotal) * totalVenta) / subtotalVenta) : 0;
+        acumulado += monto;
+        pagadoPorLinea.set(d.id, Math.max(0, monto));
+    });
+    return pagadoPorLinea;
+};
+
+// Parte de un monto reembolsado que no corresponde al recargo por factura.
+// Los puntos se ganaron sin el recargo (ver crearVenta), así que se descuentan igual.
+const montoSinRecargo = (venta, monto) => {
+    const total = parseFloat(venta.total);
+    const recargo = parseFloat(venta.monto_recargo_iva || 0);
+    return total > 0 ? (monto * (total - recargo)) / total : monto;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Monto a reembolsar por una línea de venta: proporcional a lo que el cliente
+// pagó por ella (ver calcularPagadoPorLinea), no al precio de lista.
+// Cuando la devolución completa la línea, se reembolsa el saldo exacto para que
+// la suma de devoluciones parciales no difiera por redondeo.
+// ─────────────────────────────────────────────────────────────────────────────
+const calcularSubtotalDevuelto = async (detalleOriginal, pagadoLinea, cantidadDevuelta, yaDevuelta, transaction) => {
+    const cantidadOriginal = parseFloat(detalleOriginal.cantidad);
+
+    if (yaDevuelta + cantidadDevuelta >= cantidadOriginal - 1e-9) {
+        const yaReembolsado = await DetalleDevolucion.sum('subtotal_devuelto', {
+            where: { id_detalle_venta: detalleOriginal.id },
+            transaction,
+        });
+        return redondear2(Math.max(0, pagadoLinea - parseFloat(yaReembolsado || 0)));
+    }
+
+    return redondear2((pagadoLinea * cantidadDevuelta) / cantidadOriginal);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -281,6 +336,7 @@ export const crearDevolucion = async ({
     const devolucionCreada = await sequelize.transaction(async (t) => {
         const detallesParaCrear = [];
         let totalDevuelto = 0;
+        const pagadoPorLinea = calcularPagadoPorLinea(ventaOriginal);
 
         for (const item of items) {
             // Buscar el detalle de venta original
@@ -313,7 +369,9 @@ export const crearDevolucion = async ({
             const factor_original = parseFloat(detalleOriginal.factor_aplicado);
             const precio_original = parseFloat(detalleOriginal.precio_unitario);
             const unidades_base = cantidadDevuelta * factor_original;
-            const subtotal_devuelto = precio_original * cantidadDevuelta;
+            const subtotal_devuelto = await calcularSubtotalDevuelto(
+                detalleOriginal, pagadoPorLinea.get(detalleOriginal.id), cantidadDevuelta, yaDevuelta, t
+            );
 
             // Reingresar stock
             const { id_lote, id_ubicacion } = await reingresarStock(
@@ -386,7 +444,9 @@ export const crearDevolucion = async ({
     try {
         const cliente = ventaOriginal.cliente;
         if (cliente && cliente.ci !== '000000') {
-            const puntosADescontar = Math.floor(parseFloat(devolucionCreada.monto_devuelto) / 50);
+            const puntosADescontar = Math.floor(
+                montoSinRecargo(ventaOriginal, parseFloat(devolucionCreada.monto_devuelto)) / 50
+            );
             if (puntosADescontar > 0) {
                 const puntosActuales = parseInt(cliente.puntos || 0);
                 const nuevosPuntos = Math.max(0, puntosActuales - puntosADescontar);
@@ -447,6 +507,7 @@ export const crearCambio = async ({
     const cambioCreado = await sequelize.transaction(async (t) => {
         const detallesParaCrear = [];
         let totalDevuelto = 0;
+        const pagadoPorLinea = calcularPagadoPorLinea(ventaOriginal);
         let totalNuevo = 0;
 
         for (const item of items) {
@@ -478,7 +539,9 @@ export const crearCambio = async ({
             const factor_original = parseFloat(detalleOriginal.factor_aplicado);
             const precio_original = parseFloat(detalleOriginal.precio_unitario);
             const unidades_base_devueltas = cantidadDevuelta * factor_original;
-            const subtotal_devuelto = precio_original * cantidadDevuelta;
+            const subtotal_devuelto = await calcularSubtotalDevuelto(
+                detalleOriginal, pagadoPorLinea.get(detalleOriginal.id), cantidadDevuelta, yaDevuelta, t
+            );
 
             // Reingresar stock del producto original
             const { id_lote: id_lote_devuelto, id_ubicacion: id_ubicacion_devuelta } =
@@ -583,7 +646,7 @@ export const crearCambio = async ({
             const diferencia = parseFloat(cambioCreado.monto_diferencia);
             if (diferencia < 0) {
                 // El cliente recibe plata → descontar puntos proporcionales
-                const puntosADescontar = Math.floor(Math.abs(diferencia) / 50);
+                const puntosADescontar = Math.floor(montoSinRecargo(ventaOriginal, Math.abs(diferencia)) / 50);
                 if (puntosADescontar > 0) {
                     const puntosActuales = parseInt(cliente.puntos || 0);
                     const nuevosPuntos = Math.max(0, puntosActuales - puntosADescontar);

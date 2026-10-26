@@ -9,6 +9,7 @@ class Venta extends Model {
         this.hasMany(models.DetalleVenta, { foreignKey: 'id_venta', as: 'detalles' });
         this.hasMany(models.Devolucion, { foreignKey: 'id_venta_original', as: 'devoluciones' });
         this.hasMany(models.PagoVenta, { foreignKey: 'id_venta', as: 'pagos' });
+        this.hasOne(models.Factura, { foreignKey: 'id_venta', as: 'factura' });
     }
 }
 
@@ -59,6 +60,19 @@ export default (sequelize) => {
             allowNull: false,
             defaultValue: 0
         },
+        // Recargo por emitir factura: porcentaje que ingresa el cajero (puede ser 0).
+        // Solo es informativo para el negocio: al SIAT se envía el total sin este recargo.
+        porcentaje_recargo_iva: {
+            type: DataTypes.DECIMAL(5, 2),
+            allowNull: false,
+            defaultValue: 0
+        },
+        monto_recargo_iva: {
+            type: DataTypes.DECIMAL(10, 2),
+            allowNull: false,
+            defaultValue: 0
+        },
+        // Lo que paga el cliente: subtotal - descuento global + recargo por factura
         total: {
             type: DataTypes.DECIMAL(10, 2),
             allowNull: false

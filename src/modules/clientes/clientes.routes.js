@@ -24,6 +24,10 @@ router
   .get(clienteController.getTop50);
 
 router
+  .route('/ci/:ci')
+  .get(clienteController.getByCi);
+
+router
   .route('/:id')
   .get(validate(getClienteSchema), clienteController.getById)
   .put(checkClienteExists, validate(updateClienteSchema), clienteController.update)

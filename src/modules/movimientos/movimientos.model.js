@@ -1,4 +1,5 @@
 import { Model, DataTypes } from 'sequelize';
+import { METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
 
 class Movimiento extends Model {
     static associate(models) {
@@ -37,7 +38,7 @@ export default (sequelize) => {
             allowNull: false,
         },
         tipoPago: {
-            type: DataTypes.ENUM('EFECTIVO', 'TARJETA', 'TRANSFERENCIA', 'QR', 'CHEQUE', 'OTRO'),
+            type: DataTypes.ENUM(...METODOS_PAGO_VALIDOS),
             allowNull: false,
         },
         divisa: {

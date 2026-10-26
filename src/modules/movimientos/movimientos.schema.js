@@ -1,6 +1,6 @@
 import { z } from 'zod';
+import { METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
 
-const paymentTypes = ['EFECTIVO', 'TARJETA', 'TRANSFERENCIA', 'QR', 'CHEQUE', 'OTRO'];
 const movementTypes = ['INGRESO', 'EGRESO'];
 
 const movimientoSchema = z.object({
@@ -9,7 +9,7 @@ const movimientoSchema = z.object({
     descripcion: z.string().optional().nullable(),
     fecha: z.coerce.date().optional(),
     tipo: z.enum(movementTypes),
-    tipoPago: z.enum(paymentTypes),
+    tipoPago: z.enum(METODOS_PAGO_VALIDOS),
     divisa: z.string().max(10).default('BOB'),
     categoriaMovimientoId: z.string().uuid('ID de categoría no válido.'),
     sucursalId: z.string().uuid('ID de sucursal no válido.').optional(),

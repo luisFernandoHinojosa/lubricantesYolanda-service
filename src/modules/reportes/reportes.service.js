@@ -1,5 +1,6 @@
 import { Op, fn, col, literal } from 'sequelize';
 import db from '../../database/index.js';
+import { METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
 import {
     parseDateRange, getPeriodoAnterior, calcularVariacion,
     formatCurrency, porcentaje, getGroupByExpression
@@ -61,7 +62,9 @@ export const getReporteVentas = async (query = {}) => {
     let activeDiscount = 0;
     let activeTotal = 0;
     let cancelledAmount = 0;
-    const paymentMethods = {};
+    const paymentMethods = Object.fromEntries(
+        METODOS_PAGO_VALIDOS.map((m) => [m, { total: 0, cantidad: 0 }])
+    );
 
     stats.forEach(v => {
         totalReceipts++;
@@ -603,7 +606,9 @@ export const getReporteFinanciero = async (query = {}) => {
         group: ['tipoPago'], raw: true,
     });
 
-    const flujoCaja = {};
+    const flujoCaja = Object.fromEntries(
+        METODOS_PAGO_VALIDOS.map((m) => [m, { ingresos: 0, egresos: 0 }])
+    );
     ventasFinanciero.forEach(v => {
         if (v.pagos) {
             let cambioAplicado = false;

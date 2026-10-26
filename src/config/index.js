@@ -38,6 +38,14 @@ const config = {
     cloud_name: env.get('CLOUDINARY_cloud_name').required().asString(),
     api_key: env.get('CLOUDINARY_api_key').required().asString(),
     api_secret: env.get('CLOUDINARY_api_secret').required().asString(),
+  },
+  facturacion: {
+    apiUrl: env.get('FACTURACION_API_URL').default('').asString(),
+    apiToken: env.get('FACTURACION_API_TOKEN').default('').asString(),
+    codigoDocumentoSector: env.get('FACTURACION_CODIGO_DOCUMENTO_SECTOR').default('1').asIntPositive(),
+    usuario: env.get('FACTURACION_USUARIO').default('').asString(),
+    leyenda: env.get('FACTURACION_LEYENDA').default('Ley N° 453: El proveedor deberá suministrar el servicio en las modalidades y términos ofertados o convenidos').asString(),
+    ivaPorcentaje: env.get('FACTURACION_IVA_PORCENTAJE').default('13').asFloat(),
   }
 };
 

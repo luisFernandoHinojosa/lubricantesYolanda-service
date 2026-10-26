@@ -1,115 +1,89 @@
 import asyncHandler from '../../utils/asyncHandler.js';
 import * as ventaService from '../ventas/ventas.service.js';
+import * as facturacionService from '../ventas/facturacion.service.js';
 
-export const crearVenta = asyncHandler(async (req, res, next) => {
-    try {
-        const { id: id_usuario, id_sucursal } = req.user;
-        const {
-            id_sesion_caja,
-            id_cliente,
-            items,
-            tipo_descuento_global,
-            valor_descuento_global,
-            pagos,
-            notas,
-        } = req.body;
+export const crearVenta = asyncHandler(async (req, res) => {
+    const { id: id_usuario, name_user } = req.user;
 
-        const monto_pagado = pagos.reduce((sum, p) => sum + parseFloat(p.monto), 0);
+    const venta = await ventaService.crearVenta({
+        ...req.validated.body,
+        sesion: req.sesionCaja,
+        id_usuario,
+        name_user,
+    });
 
-        const venta = await ventaService.crearVenta({
-            id_sucursal,
-            id_sesion_caja,
-            id_usuario,
-            id_cliente,
-            items,
-            tipo_descuento_global,
-            valor_descuento_global,
-            pagos,
-            monto_pagado,
-            notas,
-        });
+    const facturaFallida = venta.resultado_facturacion?.success === false;
 
-        return res.status(201).json({
-            status: "success",
-            message: 'Venta registrada exitosamente.',
-            data: venta,
-        });
-    } catch (err) {
-        next(err);
-    }
+    return res.status(201).json({
+        status: "success",
+        message: facturaFallida
+            ? 'Venta registrada, pero la factura no pudo emitirse. Puede reintentarla desde Historial de ventas.'
+            : 'Venta registrada exitosamente.',
+        data: venta,
+    });
 });
 
-export const getVenta = asyncHandler(async (req, res, next) => {
-    try {
-        const { id } = req.params;
-        const venta = await ventaService.getVentaById(id);
-        return res.status(200).json({ status: "success", message: 'Venta obtenida exitosamente.', data: venta });
-    } catch (err) {
-        next(err);
-    }
+export const getVenta = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const venta = await ventaService.getVentaById(id);
+    return res.status(200).json({ status: "success", message: 'Venta obtenida exitosamente.', data: venta });
 });
 
-export const listarVentas = asyncHandler(async (req, res, next) => {
-    try {
-        const {
-            id_sesion_caja,
-            id_usuario,
-            id_empleado,
-            id_cliente,
-            metodo_pago,
-            desde,
-            hasta,
-            page,
-            perPage,
-            search
-        } = req.query;
+export const listarVentas = asyncHandler(async (req, res) => {
+    const resultado = await ventaService.findAllVentas(req.validated.query);
 
-        const { id_sucursal } = req.user;
-
-        const resultado = await ventaService.findAllVentas({
-            search,
-            id_sucursal,
-            id_sesion_caja,
-            id_usuario,
-            id_empleado,
-            id_cliente,
-            metodo_pago,
-            desde,
-            hasta,
-            page: parseInt(page, 10) || 1,
-            perPage: parseInt(perPage, 10) || 20,
-        });
-
-        return res.status(200).json({
-            status: "success",
-            data: resultado
-        });
-    } catch (err) {
-        next(err);
-    }
+    return res.status(200).json({
+        status: "success",
+        data: resultado
+    });
 });
 
-export const getResumenSesion = asyncHandler(async (req, res, next) => {
-    try {
-        const { id_sesion } = req.params;
-        const resumen = await ventaService.getResumenVentasSesion(id_sesion);
-        return res.status(200).json({ status: "success", data: resumen });
-    } catch (err) {
-        next(err);
-    }
+export const getResumenSesion = asyncHandler(async (req, res) => {
+    const { id_sesion } = req.params;
+    const resumen = await ventaService.getResumenVentasSesion(id_sesion);
+    return res.status(200).json({ status: "success", data: resumen });
 });
 
-export const anularVenta = asyncHandler(async (req, res, next) => {
-    try {
-        const { id } = req.params;
-        const { id: id_usuario } = req.user;
-        const ventaAnulada = await ventaService.anularVenta(id, id_usuario);
-        return res.status(200).json({
-            status: "success",
-            message: 'Venta anulada exitosamente.',
-            //data: ventaAnulada 
-        });
-    } catch (err) {
-        next(err);
-    }
+export const anularVenta = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { id: id_usuario } = req.user;
+    await ventaService.anularVenta(id, id_usuario);
+    return res.status(200).json({
+        status: "success",
+        message: 'Venta anulada exitosamente.',
+    });
+});
+
+export const facturarVenta = asyncHandler(async (req, res) => {
+    const { name_user } = req.user;
+    const { params, body } = req.validated;
+
+    const venta = await ventaService.facturarVenta({
+        id_venta: params.id,
+        monto_recargo_iva: body.monto_recargo_iva,
+        name_user,
+    });
+
+    const facturaFallida = venta.resultado_facturacion?.success === false;
+
+    return res.status(200).json({
+        status: "success",
+        message: facturaFallida
+            ? 'La factura no pudo emitirse. Puede reintentarla desde Historial de ventas.'
+            : 'Factura emitida exitosamente.',
+        data: venta,
+    });
+});
+
+export const reintentarFactura = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { name_user } = req.user;
+    const resultado = await facturacionService.reintentarFactura(id, name_user);
+    return res.status(200).json({
+        status: "success",
+        message: resultado?.success
+            ? 'Factura emitida exitosamente.'
+            : 'Error al emitir factura. Revise los detalles.',
+        data: resultado,
+    });
 });

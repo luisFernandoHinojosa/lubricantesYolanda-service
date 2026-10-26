@@ -1,19 +1,16 @@
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
+import { aFechaLocal, fechaLocal, inicioDelMes, inicioDelDia, finDelDia } from '../../utils/fechas.js';
 
 dayjs.extend(utc);
 
 /**
- * Normaliza un rango de fechas. Si no se proveen, usa el mes actual.
+ * Normaliza un rango de fechas a días completos en hora de Bolivia.
+ * Si no se proveen, usa el mes actual.
  */
 export const parseDateRange = (desde, hasta) => {
-    const start = desde
-        ? dayjs.utc(desde).startOf('day').toDate()
-        : dayjs.utc().startOf('month').toDate();
-
-    const end = hasta
-        ? dayjs.utc(hasta).endOf('day').toDate()
-        : dayjs.utc().endOf('day').toDate();
+    const start = inicioDelDia(desde ? aFechaLocal(desde) : inicioDelMes());
+    const end = finDelDia(hasta ? aFechaLocal(hasta) : fechaLocal());
 
     return { start, end };
 };
@@ -23,14 +20,16 @@ export const parseDateRange = (desde, hasta) => {
  * Ej: si el rango es 1-31 marzo, retorna 1-28 febrero.
  */
 export const getPeriodoAnterior = (desde, hasta) => {
-    const start = dayjs.utc(desde);
-    const end = dayjs.utc(hasta);
+    // La aritmética de días se hace sobre fechas de calendario ('YYYY-MM-DD'),
+    // y recién al final se convierte a instantes en hora de Bolivia.
+    const start = dayjs.utc(aFechaLocal(desde));
+    const end = dayjs.utc(aFechaLocal(hasta));
     const diffDays = end.diff(start, 'day');
 
-    const anteriorEnd = start.subtract(1, 'day').endOf('day').toDate();
-    const anteriorStart = start.subtract(diffDays + 1, 'day').startOf('day').toDate();
+    const anteriorEnd = start.subtract(1, 'day').format('YYYY-MM-DD');
+    const anteriorStart = start.subtract(diffDays + 1, 'day').format('YYYY-MM-DD');
 
-    return { start: anteriorStart, end: anteriorEnd };
+    return { start: inicioDelDia(anteriorStart), end: finDelDia(anteriorEnd) };
 };
 
 /**

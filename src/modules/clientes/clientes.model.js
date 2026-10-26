@@ -1,5 +1,6 @@
 // src/modules/clientes/clientes.model.js
 import { Model, DataTypes } from 'sequelize';
+import { TIPO_DOCUMENTO_IDENTIDAD, TIPOS_DOCUMENTO_IDENTIDAD_VALIDOS } from '../../constants/business.constants.js';
 
 export default (sequelize) => {
   class Cliente extends Model {
@@ -9,6 +10,7 @@ export default (sequelize) => {
     }
 
     get esMayorDeEdad() {
+      if (!this.fecha_nacimiento) return null;
       const hoy = new Date();
       const nacimiento = new Date(this.fecha_nacimiento);
       const edad = hoy.getFullYear() - nacimiento.getFullYear();
@@ -23,10 +25,22 @@ export default (sequelize) => {
         defaultValue: DataTypes.UUIDV4,
         primaryKey: true,
       },
-      ci: {
+      ci: {// O NIT
         type: DataTypes.STRING(20),
         allowNull: false,
         validate: { notEmpty: true },
+      },
+      // Código SIAT del tipo de documento: 1=CI, 2=CEX, 3=PAS, 4=OD, 5=NIT
+      tipo_documento: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: TIPO_DOCUMENTO_IDENTIDAD.CI,
+        validate: { isIn: [TIPOS_DOCUMENTO_IDENTIDAD_VALIDOS] },
+      },
+      complemento: {
+        type: DataTypes.STRING(5),
+        allowNull: true,
+        defaultValue: null,
       },
       nombre: {
         type: DataTypes.STRING(100),
@@ -35,7 +49,7 @@ export default (sequelize) => {
       },
       apellido_paterno: {
         type: DataTypes.STRING(100),
-        allowNull: false,
+        allowNull: true,
         validate: { notEmpty: true },
       },
       apellido_materno: {
@@ -51,11 +65,11 @@ export default (sequelize) => {
       },
       fecha_nacimiento: {
         type: DataTypes.DATEONLY,
-        allowNull: false,
+        allowNull: true,
       },
       telefono: {
         type: DataTypes.STRING(50),
-        allowNull: true,
+        allowNull: false,
         defaultValue: null,
       },
       direccion: {

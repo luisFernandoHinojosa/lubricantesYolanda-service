@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
 
 const detalleProformaSchema = z.object({
   id_producto: z.string().uuid('id_producto debe ser un UUID válido'),
@@ -61,7 +62,7 @@ export const facturarProformaSchema = z.object({
   params: z.object({ id: z.string().uuid('ID inválido') }),
   body: z.object({
     id_sesion_caja: z.string().uuid('id_sesion_caja es obligatorio'),
-    metodo_pago: z.enum(['EFECTIVO', 'TARJETA', 'TRANSFERENCIA', 'QR']),
+    metodo_pago: z.enum(METODOS_PAGO_VALIDOS),
     monto_pagado: z.number().nonnegative().or(z.string().regex(/^\d+(\.\d+)?$/).transform(Number)),
     notas_adicionales: z.string().optional(),
   }),

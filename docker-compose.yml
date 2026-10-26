@@ -26,6 +26,8 @@ services:
       - "3005:3005"
     env_file:
       - .env
+    environment:
+      - TZ=America/La_Paz
     depends_on:
       - postgres
       - redis

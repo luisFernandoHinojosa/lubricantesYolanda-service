@@ -1,8 +1,10 @@
 import { Op } from 'sequelize';
 import db from '../../database/index.js';
 // import { PROFORMA_CONFIG } from '../../common/applyFilters.js';
-// import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
+import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
 import { crearVenta } from '../ventas/ventas.service.js';
+import { fechaCompacta } from '../../utils/fechas.js';
+import { BusinessRuleError } from '../../errors/AppError.js';
 
 const {
     Proforma,
@@ -17,7 +19,7 @@ const {
 } = db;
 
 const generarNumeroProforma = async (id_sucursal, transaction) => {
-    const fecha = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const fecha = fechaCompacta();
     const prefijo = `PROF-${id_sucursal.slice(0, 4).toUpperCase()}-${fecha}`;
     const count = await Proforma.count({
         where: { numero_proforma: { [Op.like]: `${prefijo}%` }, id_sucursal },
@@ -62,11 +64,17 @@ const validarYEnriquecerItemsProforma = async (items, transaction) => {
             precio_unitario = parseFloat(producto.precio_venta);
         }
 
+        // Misma regla que en la venta: el descuento (en Bs) no puede superar el importe del ítem
         const monto_descuento = parseFloat(item.monto_descuento || 0);
-        const subtotal_item = Math.max(
-            0,
-            precio_unitario * parseFloat(item.cantidad) - monto_descuento
-        );
+        const importe = precio_unitario * parseFloat(item.cantidad);
+        if (monto_descuento > importe + 1e-9) {
+            throw new BusinessRuleError(
+                `El descuento de "${producto.nombre_comercial}" (Bs ${monto_descuento.toFixed(2)}) ` +
+                `no puede superar su importe (Bs ${importe.toFixed(2)}).`,
+                'DESCUENTO_EXCEDE_IMPORTE'
+            );
+        }
+        const subtotal_item = importe - monto_descuento;
 
         itemsEnriquecidos.push({
             id_producto: item.id_producto,
@@ -121,7 +129,15 @@ export const crearProforma = async ({
             monto_descuento_global = parseFloat(valor_descuento_global);
         }
 
-        const total = Math.max(0, subtotal - monto_descuento_global);
+        if (monto_descuento_global > subtotal + 1e-9) {
+            throw new BusinessRuleError(
+                `El descuento global (Bs ${monto_descuento_global.toFixed(2)}) ` +
+                `no puede superar la suma de los productos (Bs ${subtotal.toFixed(2)}).`,
+                'DESCUENTO_EXCEDE_TOTAL'
+            );
+        }
+
+        const total = subtotal - monto_descuento_global;
         const numero_proforma = await generarNumeroProforma(id_sucursal, t);
 
         const proforma = await Proforma.create({
@@ -272,7 +288,7 @@ export const actualizarProforma = async (id, data) => {
 };
 
 export const facturarProforma = async (id, {
-    id_sucursal, id_usuario, id_sesion_caja, pagos, monto_pagado, notas_adicionales
+    sesion, id_usuario, name_user, id_sesion_caja, pagos, notas_adicionales
 }) => {
     const proforma = await getProformaById(id);
 
@@ -312,15 +328,16 @@ export const facturarProforma = async (id, {
 
     try {
         ventaGenerada = await crearVenta({
-            id_sucursal,
+            sesion,
             id_usuario,
+            name_user,
             id_sesion_caja,
-            id_cliente: proforma.id_cliente,
+            // El cliente se identifica por CI; sin cliente se usa el genérico
+            cliente: proforma.cliente ? { ci: proforma.cliente.ci } : undefined,
             items: itemsParaVenta,
             tipo_descuento_global: proforma.tipo_descuento_global,
             valor_descuento_global: proforma.valor_descuento_global,
             pagos,
-            monto_pagado,
             notas: notasCompletas
         });
     } catch (error) {
