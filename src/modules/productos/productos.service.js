@@ -5,6 +5,12 @@ import db from '../../database/index.js';
 import { loteRepository } from '../lotes/lotes.repository.js';
 import ExcelJS from 'exceljs';
 
+// Stock activo: lote activo, registro de stock activo y ubicación activa. Es el que
+// cuenta el listado, y el mismo del que descuenta la venta (ver stock_vendible.js,
+// que además excluye lotes vencidos y filtra por sucursal).
+const esStockActivo = (lote, dist) =>
+  lote.esta_activo && dist.esta_activo && dist.ubicacion?.esta_activo !== false;
+
 export class ProductoService {
 
   async getById(id) {
@@ -30,6 +36,7 @@ export class ProductoService {
         prodJSON.lotes.forEach(lote => {
           if (lote.stock_distribuciones) {
             lote.stock_distribuciones.forEach(dist => {
+              if (!esStockActivo(lote, dist)) return;
               stockTotalUnidadBase += parseFloat(dist.cantidad_actual || 0);
 
               if (!ubicacion && dist.ubicacion) {
@@ -172,15 +179,17 @@ export class ProductoService {
     const prodJSON = producto.toJSON();
     let stockTotalGeneral = 0;
 
-    const lotesValidos = prodJSON.lotes || [];
-
-    const lotesConStock = lotesValidos.map(lote => {
+    // Se devuelven todos los lotes, activos o no, con su esta_activo de la BD
+    const lotesConStock = (prodJSON.lotes || []).map(lote => {
       const distribuciones = lote.stock_distribuciones || [];
       const stockDelLote = distribuciones.reduce((acc, dist) => {
         return acc + parseFloat(dist.cantidad_actual || 0);
       }, 0);
 
-      stockTotalGeneral += stockDelLote;
+      // El consolidado es solo el stock activo, igual al stock_actual del listado
+      stockTotalGeneral += distribuciones
+        .filter(dist => esStockActivo(lote, dist))
+        .reduce((acc, dist) => acc + parseFloat(dist.cantidad_actual || 0), 0);
 
       return {
         ...lote,

@@ -88,6 +88,17 @@ const facturaDetalleDTO = (f, venta) => (f
     }
     : null);
 
+// Facturas anuladas de la venta (historial; siguen existiendo en el SIAT como anuladas)
+const facturaAnuladaDTO = (f) => ({
+    id: f.id,
+    numero_factura: f.numero_factura,
+    cuf: f.cuf || null,
+    fecha_emision: f.fecha_emision || null,
+    fecha_anulacion: f.fecha_anulacion || null,
+    url_factura_pdf: f.url_factura_pdf || null,
+    url_siat: f.url_siat || null,
+});
+
 // Devoluciones y cambios completados que se muestran en el detalle. En una venta anulada
 // no se consideran, igual que en totalesDevoluciones.
 const devolucionesVigentes = (venta) => (venta.esta_activo ? venta.devoluciones || [] : []);
@@ -164,7 +175,8 @@ export const ventaListadoDTO = (venta) => ({
     sucursal: venta.sucursal ? { id: venta.sucursal.id, nombre: venta.sucursal.nombre } : null,
     ...montosVenta(venta),
     pagos: pagosDTO(venta.pagos),
-    factura: facturaResumenDTO(venta.factura),
+    // La vigente; si no hay, la última anulada (estado ANULADA → se puede volver a emitir)
+    factura: facturaResumenDTO(venta.factura ?? venta.facturas?.[0]),
 });
 
 // `detalles` son las líneas tal como se vendieron: lo que imprime el ticket y lo que se
@@ -190,6 +202,8 @@ export const ventaDetalleDTO = (venta) => {
         notas: venta.notas || null,
         detalles: (venta.detalles || []).map((d) => detalleDTO(d, devuelto.get(d.id))),
         devoluciones: devolucionesVigentes(venta).map(devolucionDTO),
+        // La vigente; null si nunca se facturó o si la última se anuló y aún no se re-emite
         factura: facturaDetalleDTO(venta.factura, venta),
+        facturas_anuladas: (venta.facturas || []).map(facturaAnuladaDTO),
     };
 };

@@ -1,6 +1,8 @@
 import { Op } from 'sequelize';
 import db from '../../database/index.js';
 import { METODOS_PAGO_VALIDOS } from '../../constants/business.constants.js';
+import { inicioDelDia, finDelDia } from '../../utils/fechas.js';
+import { getResumenDevolucionesSesion } from '../devoluciones/devoluciones.service.js';
 
 const { SesionCaja, Venta, PagoVenta, Usuario, Sucursal, Cliente, Empleado, sequelize } = db;
 
@@ -105,7 +107,24 @@ const calcularTotalesSesion = async (id_sesion_caja) => {
     const totalVentas = Object.values(ventasPorMetodo).reduce((acc, m) => acc + m, 0);
     const ventasDigital = totalVentas - ventasEfectivo;
 
-    return { ventasEfectivo, ventasDigital, ventasPorMetodo, totalVentas, cantidadVentas: ventas.length };
+    // Devoluciones y cambios vigentes de la sesión. Solo mueven el efectivo de la caja:
+    //   - reembolsos en EFECTIVO (el crédito a favor del cliente no sale de la caja)
+    //   - diferencias cobradas en un cambio (el cambio no registra método de pago, se asume efectivo)
+    const devoluciones = await getResumenDevolucionesSesion(id_sesion_caja);
+    const reembolsosEfectivo = devoluciones.total_reembolsado_efectivo;
+    const diferenciasCobradas = devoluciones.total_diferencias_cobradas;
+    const efectivoNeto = ventasEfectivo - reembolsosEfectivo + diferenciasCobradas;
+
+    return {
+        ventasEfectivo,
+        ventasDigital,
+        ventasPorMetodo,
+        totalVentas,
+        cantidadVentas: ventas.length,
+        reembolsosEfectivo,
+        diferenciasCobradas,
+        efectivoNeto,
+    };
 };
 
 // ─── CERRAR SESIÓN (ARQUEO) ──────────────────────────────────────────────────
@@ -128,11 +147,14 @@ export const cerrarSesion = async ({ id_sesion, id_usuario, monto_cierre }) => {
         throw err;
     }
 
-    const { ventasEfectivo, ventasDigital, ventasPorMetodo, totalVentas, cantidadVentas } =
-        await calcularTotalesSesion(id_sesion);
+    const {
+        ventasEfectivo, ventasDigital, ventasPorMetodo, totalVentas, cantidadVentas,
+        reembolsosEfectivo, diferenciasCobradas, efectivoNeto,
+    } = await calcularTotalesSesion(id_sesion);
 
-    // Efectivo teórico = monto apertura + ventas en efectivo del turno
-    const monto_teorico = parseFloat(sesion.monto_apertura) + ventasEfectivo;
+    // Efectivo teórico = apertura + ventas en efectivo - reembolsos en efectivo + diferencias cobradas en cambios
+    // (las ventas anuladas ya no cuentan: calcularTotalesSesion solo toma las activas)
+    const monto_teorico = parseFloat(sesion.monto_apertura) + efectivoNeto;
     const diferencia = parseFloat(monto_cierre) - monto_teorico;
 
     await sesion.update({
@@ -151,6 +173,8 @@ export const cerrarSesion = async ({ id_sesion, id_usuario, monto_cierre }) => {
             ventas_por_metodo: ventasPorMetodo,
             total_ventas: totalVentas,
             cantidad_ventas: cantidadVentas,
+            reembolsos_efectivo: reembolsosEfectivo,
+            diferencias_cobradas: diferenciasCobradas,
             monto_teorico,
             monto_cierre: parseFloat(monto_cierre),
             diferencia,
@@ -171,8 +195,9 @@ export const getHistorialSesiones = async ({ id_sucursal, id_usuario, desde, has
     }
     if (desde || hasta) {
         where.fecha_apertura = {};
-        if (desde) where.fecha_apertura[Op.gte] = new Date(desde);
-        if (hasta) where.fecha_apertura[Op.lte] = new Date(hasta);
+        // 'YYYY-MM-DD' = día completo en hora de Bolivia (new Date('YYYY-MM-DD') sería medianoche UTC)
+        if (desde) where.fecha_apertura[Op.gte] = inicioDelDia(desde);
+        if (hasta) where.fecha_apertura[Op.lte] = finDelDia(hasta);
     }
 
     const offset = (page - 1) * limit;
@@ -230,8 +255,10 @@ export const getDetalleSesion = async (id_sesion) => {
         throw err;
     }
 
-    const { ventasEfectivo, ventasDigital, ventasPorMetodo, totalVentas, cantidadVentas } =
-        await calcularTotalesSesion(id_sesion);
+    const {
+        ventasEfectivo, ventasDigital, ventasPorMetodo, totalVentas, cantidadVentas,
+        reembolsosEfectivo, diferenciasCobradas,
+    } = await calcularTotalesSesion(id_sesion);
 
     return {
         sesion,
@@ -241,6 +268,8 @@ export const getDetalleSesion = async (id_sesion) => {
             ventas_por_metodo: ventasPorMetodo,
             total_ventas: totalVentas,
             cantidad_ventas: cantidadVentas,
+            reembolsos_efectivo: reembolsosEfectivo,
+            diferencias_cobradas: diferenciasCobradas,
         },
     };
 };

@@ -2,7 +2,7 @@ import { Op } from 'sequelize';
 import db from '../../database/index.js';
 import { VENTA_CONFIG } from '../../common/applyFilters.js';
 import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
-import { emitirFactura, siguienteNumeroFactura } from './facturacion.service.js';
+import { emitirFactura, siguienteNumeroFactura, anularFacturaProveedor } from './facturacion.service.js';
 import { METODOS_PAGO_VALIDOS, CI_CLIENTE_GENERICO } from '../../constants/business.constants.js';
 import {
     NotFoundError,
@@ -16,6 +16,7 @@ import { clienteNuevoVentaSchema } from '../clientes/clientes.schema.js';
 import { eventEmitter } from '../../services/event.service.js';
 import { fechaCompacta, inicioDelDia, finDelDia } from '../../utils/fechas.js';
 import { ventaListadoDTO, ventaDetalleDTO } from './ventas.dto.js';
+import { whereStockVendible, whereLoteVendible, whereUbicacionVendible } from '../stock_distribucion/stock_vendible.js';
 
 const {
     Venta,
@@ -155,23 +156,24 @@ const aplicarFIFO = async (registros, unidades, transaction) => {
     return movimientos;
 };
 
-// Stock disponible en la sucursal de todos los productos, en una sola consulta.
+// Stock vendible en la sucursal de todos los productos, en una sola consulta (mismas
+// condiciones que el POS, ver stock_vendible.js).
 // Retorna Map<id_producto, registros[]> en orden FIFO (lote más antiguo primero).
-const cargarStockFIFO = async (idsProducto, id_sucursal, transaction) => {
+const cargarStockFIFO = async (productos, id_sucursal, transaction) => {
     const registros = await StockDistribucion.findAll({
-        where: { cantidad_actual: { [Op.gt]: 0 } },
+        where: whereStockVendible(),
         include: [
             {
                 model: Lote,
                 as: 'lote',
-                where: { id_producto: idsProducto },
+                where: whereLoteVendible(productos),
                 attributes: ['id', 'id_producto', 'fecha_ingreso'],
                 required: true,
             },
             {
                 model: Ubicacion,
                 as: 'ubicacion',
-                where: { id_sucursal },
+                where: whereUbicacionVendible(id_sucursal),
                 attributes: [],
                 required: true,
             },
@@ -182,7 +184,7 @@ const cargarStockFIFO = async (idsProducto, id_sucursal, transaction) => {
         transaction,
     });
 
-    const porProducto = new Map(idsProducto.map((id) => [id, []]));
+    const porProducto = new Map(productos.map((p) => [p.id, []]));
     for (const registro of registros) {
         porProducto.get(registro.lote.id_producto).push(registro);
     }
@@ -208,20 +210,22 @@ const cargarSeriesDisponibles = async (numerosSerie, transaction) => {
     return new Map(series.map((s) => [`${s.numero_serie}::${s.lote.id_producto}`, s]));
 };
 
+// Solo lotes y ubicaciones activos: si el stock vuelve a uno inactivo, el POS no lo ve
 const reingresarStock = async (id_producto, id_sucursal, unidades, transaction) => {
     const registro = await StockDistribucion.findOne({
+        where: { esta_activo: true },
         include: [
             {
                 model: Lote,
                 as: 'lote',
-                where: { id_producto },
+                where: { id_producto, esta_activo: true },
                 attributes: ['id', 'codigo_lote', 'fecha_ingreso'],
                 required: true,
             },
             {
                 model: Ubicacion,
                 as: 'ubicacion',
-                where: { id_sucursal },
+                where: whereUbicacionVendible(id_sucursal),
                 attributes: ['id', 'nombre'],
                 required: true,
             },
@@ -252,7 +256,7 @@ const validarYEnriquecerItems = async (items, id_sucursal, transaction) => {
 
     const productos = await Producto.findAll({
         where: { id: idsProducto },
-        attributes: ['id', 'nombre_comercial', 'codigo_barras', 'precio_venta'],
+        attributes: ['id', 'nombre_comercial', 'codigo_barras', 'precio_venta', 'maneja_vencimiento'],
         include: [{ model: UnidadMedida, as: 'unidad_medida', attributes: ['id', 'nombre', 'abreviatura'] }],
         transaction,
     });
@@ -351,7 +355,7 @@ const validarYEnriquecerItems = async (items, id_sucursal, transaction) => {
     }
 
     // ── Stock: se valida contra lo requerido por producto (unidad + presentaciones) ──
-    const stockPorProducto = await cargarStockFIFO(idsProducto, id_sucursal, transaction);
+    const stockPorProducto = await cargarStockFIFO(productos, id_sucursal, transaction);
 
     const requeridoPorProducto = new Map();
     for (const item of itemsEnriquecidos) {
@@ -578,90 +582,135 @@ export const crearVenta = async ({
     };
 };
 
-// ─── Facturar una venta registrada sin factura ───────────────────────────────
-// Se factura con los detalles, pagos y cliente guardados en la venta. El recargo
-// (en Bs) se registra una sola vez, junto con la factura: después la venta ya no
-// puede volver a facturarse. Igual que en crearVenta, no va en la factura ni suma
-// puntos de lealtad, y no se registra como un pago.
-export const facturarVenta = async ({ id_venta, monto_recargo_iva = 0, name_user }) => {
-    const montoRecargo = redondear2(parseFloat(monto_recargo_iva) || 0);
+// ─── Facturación posterior a la venta ────────────────────────────────────────
+// POST /ventas/:id/facturar (venta que nunca tuvo factura) y POST /ventas/:id/reintentar-factura
+// (factura vigente en PENDIENTE/ERROR, o la última anulada). La factura se arma con los
+// detalles, pagos y cliente guardados en la venta.
 
-    await sequelize.transaction(async (t) => {
-        // Bloquea la venta para que dos solicitudes simultáneas no la facturen dos veces
-        const venta = await Venta.findByPk(id_venta, {
-            include: [
-                { model: Cliente, as: 'cliente', attributes: ['id', 'ci'] },
-                { model: Factura, as: 'factura', attributes: ['id', 'estado', 'numero_factura'] },
-            ],
-            lock: { level: t.LOCK.UPDATE, of: Venta },
-            transaction: t,
-        });
+// Bloquea la venta para que dos solicitudes simultáneas no la facturen dos veces.
+// `factura` es la vigente (las anuladas no se incluyen).
+const cargarVentaParaFacturar = (id_venta, transaction) => Venta.findByPk(id_venta, {
+    include: [
+        { model: Cliente, as: 'cliente', attributes: ['id', 'ci', 'puntos'] },
+        { model: Factura, as: 'factura', attributes: ['id', 'estado', 'numero_factura'] },
+    ],
+    lock: { level: transaction.LOCK.UPDATE, of: Venta },
+    transaction,
+});
 
-        if (!venta) {
-            throw new NotFoundError('Venta', 'Venta no encontrada.');
-        }
+const validarVentaFacturable = async (venta, transaction) => {
+    if (!venta) {
+        throw new NotFoundError('Venta', 'Venta no encontrada.');
+    }
 
-        if (!venta.esta_activo) {
-            throw new ConflictError('No se puede facturar una venta anulada.');
-        }
+    if (!venta.esta_activo) {
+        throw new ConflictError('No se puede facturar una venta anulada.');
+    }
 
-        if (venta.factura) {
-            throw new ConflictError(
-                venta.factura.estado === 'FACTURADA'
-                    ? `La venta ${venta.numero_comprobante} ya fue facturada (factura N° ${venta.factura.numero_factura}).`
-                    : `La venta ${venta.numero_comprobante} ya tiene la factura N° ${venta.factura.numero_factura} ` +
-                      `en estado ${venta.factura.estado}. Use la opción de reintentar factura.`
-            );
-        }
+    if (venta.factura?.estado === 'FACTURADA') {
+        throw new ConflictError(
+            `La venta ${venta.numero_comprobante} ya fue facturada (factura N° ${venta.factura.numero_factura}).`
+        );
+    }
 
-        if (!venta.cliente?.ci || venta.cliente.ci === CI_CLIENTE_GENERICO) {
-            throw new BusinessRuleError(
-                'Para facturar, la venta debe tener un cliente con CI/NIT.',
-                'CLIENTE_REQUERIDO_PARA_FACTURAR'
-            );
-        }
+    if (!venta.cliente?.ci || venta.cliente.ci === CI_CLIENTE_GENERICO) {
+        throw new BusinessRuleError(
+            'Para facturar, la venta debe tener un cliente con CI/NIT.',
+            'CLIENTE_REQUERIDO_PARA_FACTURAR'
+        );
+    }
 
-        // La factura se arma con los detalles originales: si hubo devoluciones o cambios
-        // ya no coinciden con lo que el cliente se llevó.
-        const devoluciones = await Devolucion.count({
-            where: { id_venta_original: venta.id, estado: 'COMPLETADA', esta_activo: true },
-            transaction: t,
-        });
-        if (devoluciones > 0) {
-            throw new BusinessRuleError(
-                'No se puede facturar una venta con devoluciones o cambios registrados.',
-                'VENTA_CON_DEVOLUCIONES'
-            );
-        }
+    // La factura se arma con los detalles originales: si hubo devoluciones o cambios
+    // ya no coinciden con lo que el cliente se llevó.
+    const devoluciones = await Devolucion.count({
+        where: { id_venta_original: venta.id, estado: 'COMPLETADA', esta_activo: true },
+        transaction,
+    });
+    if (devoluciones > 0) {
+        throw new BusinessRuleError(
+            'No se puede facturar una venta con devoluciones o cambios registrados.',
+            'VENTA_CON_DEVOLUCIONES'
+        );
+    }
+};
 
-        if (montoRecargo > 0) {
-            const totalSinRecargo = redondear2(parseFloat(venta.total) - parseFloat(venta.monto_recargo_iva || 0));
-            const porcentajeRecargo = totalSinRecargo > 0 ? redondear2((montoRecargo * 100) / totalSinRecargo) : 0;
-            if (porcentajeRecargo > 100) {
-                throw new BusinessRuleError(
-                    `El recargo por factura (Bs ${montoRecargo.toFixed(2)}) no puede superar ` +
-                    `el total de la venta (Bs ${totalSinRecargo.toFixed(2)}).`
-                );
-            }
+// Recargo por factura de una venta que nunca tuvo factura (sin recargo previo), con la regla
+// de crearVenta: monto = total × porcentaje / 100. El cliente lo paga aparte: se registra
+// como un PagoVenta más (para que caja y reportes, que suman los pagos, cuadren) y se suma
+// a monto_pagado, así cambio_entregado (= monto_pagado − total) no cambia. Como en
+// crearVenta, no va en la factura ni suma puntos de lealtad.
+const aplicarRecargoFactura = async (venta, porcentajeRecargo, metodoPago, transaction) => {
+    if (porcentajeRecargo < 0 || porcentajeRecargo > 100) {
+        throw new BusinessRuleError('El porcentaje de recargo por factura debe estar entre 0 y 100.');
+    }
 
-            // `total` incluye el recargo (ver Venta): emitirFactura lo resta para obtener
-            // el monto que va al SIAT, por eso se actualiza junto con el recargo.
-            await venta.update({
-                porcentaje_recargo_iva: porcentajeRecargo.toFixed(2),
-                monto_recargo_iva: montoRecargo.toFixed(2),
-                total: redondear2(totalSinRecargo + montoRecargo).toFixed(2),
-            }, { transaction: t });
-        }
+    const totalSinRecargo = parseFloat(venta.total);
+    const montoRecargo = redondear2((totalSinRecargo * porcentajeRecargo) / 100);
+    if (montoRecargo <= 0) return;
 
-        // Último paso, como en crearVenta, para no consumir números de la secuencia si algo falla
-        await Factura.create({
-            id_venta: venta.id,
-            estado: 'PENDIENTE',
-            numero_factura: await siguienteNumeroFactura(t),
-        }, { transaction: t });
+    // `total` incluye el recargo (ver Venta): emitirFactura lo resta para obtener
+    // el monto que va al SIAT, por eso se actualiza junto con el recargo.
+    await venta.update({
+        porcentaje_recargo_iva: porcentajeRecargo.toFixed(2),
+        monto_recargo_iva: montoRecargo.toFixed(2),
+        total: redondear2(totalSinRecargo + montoRecargo).toFixed(2),
+        monto_pagado: redondear2(parseFloat(venta.monto_pagado) + montoRecargo).toFixed(2),
+    }, { transaction });
+
+    // Al final: el pago de orden 0 define el método de pago de la factura
+    const ultimoOrden = await PagoVenta.max('orden', { where: { id_venta: venta.id }, transaction });
+    await PagoVenta.create({
+        id_venta: venta.id,
+        metodo_pago: metodoPago,
+        orden: (ultimoOrden ?? -1) + 1,
+        monto: montoRecargo.toFixed(2),
+        referencia: 'Recargo por factura',
+    }, { transaction });
+};
+
+// Pasa la venta (y su próxima factura) a otro cliente ya registrado, junto con los puntos
+// de lealtad que otorgó (misma regla que crearVenta: sin el recargo).
+const cambiarClienteVenta = async (venta, id_cliente, transaction) => {
+    const nuevoCliente = await Cliente.findByPk(id_cliente, {
+        attributes: ['id', 'ci', 'esta_activo'],
+        transaction,
     });
 
-    // ── Facturación (fuera de la transacción DB, la factura PENDIENTE ya está registrada) ──
+    if (!nuevoCliente) {
+        throw new NotFoundError('Cliente', 'Cliente no encontrado.');
+    }
+    if (!nuevoCliente.esta_activo) {
+        throw new BusinessRuleError('El cliente seleccionado está inactivo.', 'CLIENTE_INACTIVO');
+    }
+    if (!nuevoCliente.ci || nuevoCliente.ci === CI_CLIENTE_GENERICO) {
+        throw new BusinessRuleError(
+            'Para facturar, el cliente debe tener CI/NIT.',
+            'CLIENTE_REQUERIDO_PARA_FACTURAR'
+        );
+    }
+
+    const totalSinRecargo = parseFloat(venta.total) - parseFloat(venta.monto_recargo_iva || 0);
+    const puntos = Math.floor(totalSinRecargo / MONTO_POR_PUNTO);
+    const anterior = venta.cliente;
+
+    if (puntos > 0) {
+        if (anterior && anterior.ci !== CI_CLIENTE_GENERICO) {
+            await Cliente.update(
+                { puntos: Math.max(0, parseInt(anterior.puntos || 0) - puntos) },
+                { where: { id: anterior.id }, transaction }
+            );
+        }
+        await Cliente.increment('puntos', { by: puntos, where: { id: nuevoCliente.id }, transaction });
+    }
+
+    await venta.update({ id_cliente: nuevoCliente.id }, { transaction });
+    // validarVentaFacturable revisa el CI del cliente cargado en la venta
+    venta.cliente = nuevoCliente;
+};
+
+// Emite la factura vigente fuera de la transacción (la factura PENDIENTE ya está registrada)
+// y responde con el mismo formato que GET /ventas/:id.
+const emitirYObtenerVenta = async (id_venta, name_user) => {
     let resultadoFacturacion;
     try {
         resultadoFacturacion = await emitirFactura(id_venta, name_user);
@@ -676,6 +725,131 @@ export const facturarVenta = async ({ id_venta, monto_recargo_iva = 0, name_user
     };
 };
 
+// Con `id_cliente` (p. ej. una venta hecha a Público General) la venta pasa a ese cliente
+// registrado, solo si es de la sesión de caja abierta del cajero (`id_sesion_abierta`):
+// evita facturar ventas antiguas a nombre de otra persona.
+export const facturarVenta = async ({
+    id_venta, porcentaje_recargo_iva = 0, metodo_pago_recargo = 'EFECTIVO',
+    id_cliente, id_sesion_abierta, name_user,
+}) => {
+    const porcentajeRecargo = parseFloat(porcentaje_recargo_iva) || 0;
+
+    await sequelize.transaction(async (t) => {
+        const venta = await cargarVentaParaFacturar(id_venta, t);
+
+        if (venta && id_cliente && id_cliente !== venta.id_cliente) {
+            if (!id_sesion_abierta || venta.id_sesion_caja !== id_sesion_abierta) {
+                throw new BusinessRuleError(
+                    'Solo se puede cambiar el cliente al facturar ventas de su sesión de caja abierta.',
+                    'VENTA_DE_OTRA_SESION'
+                );
+            }
+            await cambiarClienteVenta(venta, id_cliente, t);
+        }
+
+        await validarVentaFacturable(venta, t);
+
+        const facturasPrevias = await Factura.count({ where: { id_venta: venta.id }, transaction: t });
+        if (facturasPrevias > 0) {
+            throw new ConflictError(
+                `La venta ${venta.numero_comprobante} ya tiene facturas registradas. Use la opción de reintentar factura.`
+            );
+        }
+
+        if (porcentajeRecargo > 0) {
+            await aplicarRecargoFactura(venta, porcentajeRecargo, metodo_pago_recargo, t);
+        }
+
+        // Último paso, como en crearVenta, para no consumir números de la secuencia si algo falla
+        await Factura.create({
+            id_venta: venta.id,
+            estado: 'PENDIENTE',
+            numero_factura: await siguienteNumeroFactura(t),
+        }, { transaction: t });
+    });
+
+    return emitirYObtenerVenta(id_venta, name_user);
+};
+
+// Solo corrige datos fiscales: los montos (incluido el recargo, que ya se cobró y no va en la
+// factura) no cambian. Sin `id_cliente` se usa el cliente de la venta (con sus datos ya
+// corregidos); con otro `id_cliente` registrado, la venta pasa a ese cliente.
+export const reintentarFacturaVenta = async ({ id_venta, id_cliente, name_user }) => {
+    await sequelize.transaction(async (t) => {
+        const venta = await cargarVentaParaFacturar(id_venta, t);
+
+        if (venta && id_cliente && id_cliente !== venta.id_cliente) {
+            await cambiarClienteVenta(venta, id_cliente, t);
+        }
+
+        await validarVentaFacturable(venta, t);
+
+        const facturasPrevias = await Factura.count({ where: { id_venta: venta.id }, transaction: t });
+        if (facturasPrevias === 0) {
+            throw new ConflictError(
+                `La venta ${venta.numero_comprobante} no tiene factura. Use la opción de facturar venta.`
+            );
+        }
+
+        // Sin factura vigente (la última se anuló): nueva factura con el siguiente número.
+        // Una vigente en PENDIENTE/ERROR conserva su número.
+        if (!venta.factura) {
+            await Factura.create({
+                id_venta: venta.id,
+                estado: 'PENDIENTE',
+                numero_factura: await siguienteNumeroFactura(t),
+            }, { transaction: t });
+        }
+    });
+
+    return emitirYObtenerVenta(id_venta, name_user);
+};
+
+// ─── Anular la factura de una venta ──────────────────────────────────────────
+// Solo para corregir un dato mal enviado: anula la factura en el SIAT y la deja como
+// historial, sin tocar la venta (recargo, total y cambio quedan igual). Después se
+// vuelve a emitir con POST /ventas/:id/reintentar-factura (nueva factura y número).
+export const anularFacturaVenta = async ({ id_venta }) => {
+    const venta = await Venta.findByPk(id_venta, {
+        include: [{ model: Factura, as: 'factura', attributes: ['id', 'estado', 'numero_factura', 'cuf'] }],
+    });
+
+    if (!venta) {
+        throw new NotFoundError('Venta', 'Venta no encontrada.');
+    }
+
+    const { factura } = venta;
+    if (factura?.estado !== 'FACTURADA') {
+        throw new ConflictError(`La venta ${venta.numero_comprobante} no tiene una factura emitida para anular.`);
+    }
+
+    if (!factura.cuf) {
+        throw new BusinessRuleError(
+            `La factura N° ${factura.numero_factura} no tiene CUF registrado: no se puede anular en el SIAT.`,
+            'FACTURA_SIN_CUF'
+        );
+    }
+
+    const resultado = await anularFacturaProveedor(factura.cuf);
+    if (!resultado.success) {
+        throw new BusinessRuleError(
+            `No se pudo anular la factura N° ${factura.numero_factura}: ${resultado.error}`,
+            'ANULACION_RECHAZADA'
+        );
+    }
+
+    const [anuladas] = await Factura.update(
+        { estado: 'ANULADA', fecha_anulacion: new Date() },
+        { where: { id: factura.id, estado: 'FACTURADA' } }
+    );
+    // Otra solicitud simultánea ya la anuló
+    if (anuladas === 0) {
+        throw new ConflictError(`La factura N° ${factura.numero_factura} ya fue anulada.`);
+    }
+
+    return getVentaById(id_venta);
+};
+
 export const anularVenta = async (id_venta, id_usuario) => {
     const empleado = await Empleado.findOne({ where: { usuario_id: id_usuario } });
     if (!empleado) {
@@ -686,6 +860,7 @@ export const anularVenta = async (id_venta, id_usuario) => {
         include: [
             { model: DetalleVenta, as: 'detalles' },
             { model: Cliente, as: 'cliente' },
+            { model: Factura, as: 'factura', attributes: ['id', 'estado', 'numero_factura'] },
         ],
     });
 
@@ -695,6 +870,12 @@ export const anularVenta = async (id_venta, id_usuario) => {
 
     if (!venta.esta_activo) {
         throw new ConflictError('La venta ya se encuentra anulada.');
+    }
+
+    if (venta.factura?.estado === 'FACTURADA') {
+        throw new ConflictError(
+            `La venta tiene la factura N° ${venta.factura.numero_factura} vigente. Anule primero la factura.`
+        );
     }
 
     await sequelize.transaction(async (t) => {
@@ -736,7 +917,8 @@ export const anularVenta = async (id_venta, id_usuario) => {
     try {
         const cliente = venta.cliente;
         if (cliente && cliente.ci !== CI_CLIENTE_GENERICO) {
-            const totalVenta = parseFloat(venta.total);
+            // Los puntos se otorgaron sin el recargo por factura (ver crearVenta)
+            const totalVenta = parseFloat(venta.total) - parseFloat(venta.monto_recargo_iva || 0);
             const puntosADescontar = Math.floor(totalVenta / MONTO_POR_PUNTO);
 
             if (puntosADescontar > 0) {
@@ -774,6 +956,13 @@ export const getVentaById = async (id) => {
                 model: Factura,
                 as: 'factura',
                 attributes: { exclude: ['xml_factura'] },
+            },
+            {
+                model: Factura,
+                as: 'facturas',
+                where: { estado: 'ANULADA' },
+                required: false,
+                attributes: ['id', 'numero_factura', 'cuf', 'fecha_emision', 'fecha_anulacion', 'url_factura_pdf', 'url_siat'],
             },
             {
                 model: PagoVenta,
@@ -830,6 +1019,7 @@ export const getVentaById = async (id) => {
         order: [
             [{ model: PagoVenta, as: 'pagos' }, 'orden', 'ASC'],
             [{ model: Devolucion, as: 'devoluciones' }, 'createdAt', 'ASC'],
+            [{ model: Factura, as: 'facturas' }, 'fecha_anulacion', 'ASC'],
         ],
     });
 
@@ -900,6 +1090,16 @@ export const findAllVentas = async (query) => {
                     attributes: ['id', 'estado', 'numero_factura', 'fecha_emision'],
                     required: false,
                 },
+                // Sin factura vigente, el listado muestra la última anulada (para volver a emitir)
+                {
+                    model: Factura,
+                    as: 'facturas',
+                    attributes: ['id', 'id_venta', 'estado', 'numero_factura', 'fecha_emision'],
+                    where: { estado: 'ANULADA' },
+                    required: false,
+                    separate: true,
+                    order: [['fecha_anulacion', 'DESC']],
+                },
                 {
                     model: PagoVenta,
                     as: 'pagos',
@@ -952,6 +1152,7 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
         cantidad_devoluciones: 0,
         cantidad_cambios: 0,
         total_reembolsado: 0,
+        total_reembolsado_efectivo: 0,
         total_diferencias_cobradas: 0,
     };
 
@@ -986,9 +1187,15 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
         const { Devolucion } = db;
         if (Devolucion) {
             const devoluciones = await Devolucion.findAll({
-                where: { id_sesion_caja },
+                where: { id_sesion_caja, estado: 'COMPLETADA', esta_activo: true },
                 attributes: ['tipo', 'monto_devuelto', 'monto_diferencia', 'metodo_reembolso'],
             });
+
+            const reembolsar = (monto, metodo) => {
+                resumen.total_reembolsado += monto;
+                // Solo el reembolso en efectivo sale de la caja (el crédito queda a favor del cliente)
+                if (metodo === 'EFECTIVO') resumen.total_reembolsado_efectivo += monto;
+            };
 
             devoluciones.forEach((d) => {
                 const devuelto = parseFloat(d.monto_devuelto);
@@ -996,13 +1203,13 @@ export const getResumenVentasSesion = async (id_sesion_caja) => {
 
                 if (d.tipo === 'DEVOLUCION') {
                     resumen.cantidad_devoluciones++;
-                    resumen.total_reembolsado += devuelto;
+                    reembolsar(devuelto, d.metodo_reembolso);
                 } else {
                     resumen.cantidad_cambios++;
                     if (diferencia > 0) {
                         resumen.total_diferencias_cobradas += diferencia;
                     } else if (diferencia < 0) {
-                        resumen.total_reembolsado += Math.abs(diferencia);
+                        reembolsar(Math.abs(diferencia), d.metodo_reembolso);
                     }
                 }
             });

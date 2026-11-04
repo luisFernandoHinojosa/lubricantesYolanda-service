@@ -3,6 +3,7 @@ import db from '../../database/index.js';
 import { DEVOLUCION_CONFIG } from '../../common/applyFilters.js';
 import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
 import { fechaCompacta } from '../../utils/fechas.js';
+import { whereStockVendible, whereLoteVendible, whereUbicacionVendible } from '../stock_distribucion/stock_vendible.js';
 
 const {
     Devolucion,
@@ -103,23 +104,25 @@ const calcularSubtotalDevuelto = async (detalleOriginal, pagadoLinea, cantidadDe
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Reingresar stock a StockDistribucion (inverso de FIFO)
-// Devuelve el stock al lote más reciente de ese producto en la sucursal
+// Devuelve el stock al lote activo más reciente de ese producto en la sucursal
+// (si vuelve a un lote o ubicación inactivos, el POS no lo ve)
 // ─────────────────────────────────────────────────────────────────────────────
 const reingresarStock = async (id_producto, id_sucursal, unidades, transaction) => {
     // Buscar el registro de stock más reciente para este producto en esta sucursal
     const registro = await StockDistribucion.findOne({
+        where: { esta_activo: true },
         include: [
             {
                 model: Lote,
                 as: 'lote',
-                where: { id_producto },
+                where: { id_producto, esta_activo: true },
                 attributes: ['id', 'codigo_lote', 'fecha_ingreso'],
                 required: true,
             },
             {
                 model: Ubicacion,
                 as: 'ubicacion',
-                where: { id_sucursal },
+                where: whereUbicacionVendible(id_sucursal),
                 attributes: ['id', 'nombre'],
                 required: true,
             },
@@ -165,28 +168,30 @@ const aplicarFIFO = async (registros, unidades, transaction) => {
     }
 };
 
-const getStockDisponible = async (id_producto, id_sucursal, transaction) => {
+// Mismas condiciones que la venta y el POS (ver stock_vendible.js)
+const getStockDisponible = async (producto, id_sucursal, transaction) => {
     const registros = await StockDistribucion.findAll({
-        where: { cantidad_actual: { [Op.gt]: 0 } },
+        where: whereStockVendible(),
         include: [
             {
                 model: Lote,
                 as: 'lote',
-                where: { id_producto },
+                where: whereLoteVendible([producto]),
                 attributes: ['id', 'codigo_lote', 'fecha_ingreso'],
                 required: true,
             },
             {
                 model: Ubicacion,
                 as: 'ubicacion',
-                where: { id_sucursal },
+                where: whereUbicacionVendible(id_sucursal),
                 attributes: ['id', 'nombre'],
                 required: true,
             },
         ],
-        order: [[{ model: Lote, as: 'lote' }, 'fecha_ingreso', 'ASC']],
+        order: [[{ model: Lote, as: 'lote' }, 'fecha_ingreso', 'ASC'], ['id', 'ASC']],
         transaction,
-        lock: true,
+        // OF: bloquea solo las filas de stock, como en ventas
+        lock: { level: transaction.LOCK.UPDATE, of: StockDistribucion },
     });
 
     const total = registros.reduce((acc, r) => acc + parseFloat(r.cantidad_actual), 0);
@@ -262,7 +267,7 @@ const validarItemNuevo = async (item, id_sucursal, transaction) => {
 
     // 4. Validar Stock Disponible
     const { total: stockDisponible, registros } = await getStockDisponible(
-        item.id_producto_nuevo,
+        producto,
         id_sucursal,
         transaction
     );
@@ -824,8 +829,9 @@ export const getDevolucionesByVenta = async (id_venta) => {
 // Resumen de devoluciones de una sesión de caja
 // ─────────────────────────────────────────────────────────────────────────────
 export const getResumenDevolucionesSesion = async (id_sesion_caja) => {
+    // Solo las vigentes: una devolución anulada no movió dinero de la caja
     const devoluciones = await Devolucion.findAll({
-        where: { id_sesion_caja },
+        where: { id_sesion_caja, estado: 'COMPLETADA', esta_activo: true },
         attributes: ['tipo', 'monto_devuelto', 'monto_diferencia', 'metodo_reembolso'],
     });
 

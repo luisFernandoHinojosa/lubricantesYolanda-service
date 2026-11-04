@@ -110,7 +110,12 @@ export const emitirFactura = async (idVenta, nameUser) => {
         throw new NotFoundError('Venta', 'Venta no encontrada para facturar.');
     }
 
+    if (!venta.esta_activo) {
+        throw new ConflictError('No se puede facturar una venta anulada.');
+    }
+
     // Evita emitir una segunda factura fiscal para la misma venta
+    // (`venta.factura` es la vigente: las anuladas no se incluyen)
     if (venta.factura?.estado === 'FACTURADA') {
         throw new ConflictError(
             `La venta ${venta.numero_comprobante} ya fue facturada (factura N° ${venta.factura.numero_factura}).`
@@ -131,8 +136,9 @@ export const emitirFactura = async (idVenta, nameUser) => {
     const tipoDocumento = cliente.tipo_documento || TIPO_DOCUMENTO_IDENTIDAD.CI;
     const complemento = cliente.complemento || null;
 
-    // 3. Factura de la venta. Si se registró sin facturar, se crea ahora con el siguiente
-    //    número de la secuencia; en un reintento se reutiliza el número ya asignado.
+    // 3. Factura vigente de la venta. Si no tiene (se registró sin facturar o la última se
+    //    anuló), se crea ahora con el siguiente número de la secuencia; en un reintento de
+    //    una PENDIENTE/ERROR se reutiliza el número ya asignado.
     const factura = venta.factura || await Factura.create({
         id_venta: venta.id,
         estado: 'PENDIENTE',
@@ -291,8 +297,73 @@ export const emitirFactura = async (idVenta, nameUser) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Reintentar facturación de una venta con estado ERROR o PENDIENTE
+// `siatRespuesta` de la anulación llega como el print_r de PHP de un objeto:
+//   "stdClass Object\n(\n    [codigo] => 936\n    [descripcion] => LA FACTURA ...\n)\n"
+// Retorna sus campos como { codigo: '936', descripcion: 'LA FACTURA ...' }.
 // ─────────────────────────────────────────────────────────────────────────────
-export const reintentarFactura = async (idVenta, nameUser) => {
-    return emitirFactura(idVenta, nameUser);
+const parsearSiatRespuesta = (siatRespuesta) => {
+    if (typeof siatRespuesta !== 'string') return {};
+    return Object.fromEntries(
+        [...siatRespuesta.matchAll(/\[(\w+)\] => (.*)/g)].map(([, clave, valor]) => [clave, valor.trim()])
+    );
+};
+
+// Código del SIAT: la factura ya se encuentra anulada
+const CODIGO_SIAT_YA_ANULADA = '936';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Anular en el proveedor una factura ya emitida, por su CUF.
+// No toca la base de datos: eso lo hace anularFacturaVenta (ventas.service.js)
+// solo cuando el proveedor confirma la anulación.
+// ─────────────────────────────────────────────────────────────────────────────
+export const anularFacturaProveedor = async (cuf) => {
+    const { apiUrl, apiToken } = config.facturacion;
+
+    if (!apiUrl || !apiToken) {
+        return {
+            success: false,
+            error: 'Facturación no configurada en el servidor (faltan variables de entorno).',
+        };
+    }
+
+    try {
+        const respuesta = await axios.post(apiUrl + '/factura/anular', { cuf }, {
+            headers: {
+                'Authorization': `Bearer ${apiToken}`,
+                'Content-Type': 'application/json',
+            },
+            timeout: 80000, // 80 segundos
+        });
+
+        // Responde HTTP 200 también cuando el SIAT rechaza la anulación
+        const body = respuesta.data || {};
+        if (body.transaccion === true) {
+            return { success: true };
+        }
+
+        // Si ya estaba anulada en el SIAT (p. ej. falló nuestra BD después de anularla),
+        // se toma como éxito para que el estado local quede sincronizado
+        const siat = parsearSiatRespuesta(body.siatRespuesta);
+        if (siat.codigo === CODIGO_SIAT_YA_ANULADA) {
+            return { success: true };
+        }
+
+        return {
+            success: false,
+            error: siat.descripcion
+                || formatearMensajeProveedor(body.message)
+                || 'El proveedor no confirmó la anulación.',
+        };
+    } catch (error) {
+        const data = error.response?.data;
+        const mensajeError = formatearMensajeProveedor(data?.message)
+            || formatearMensajeProveedor(data?.mensaje)
+            || formatearMensajeProveedor(data?.error)
+            || formatearMensajeProveedor(data)
+            || error.message;
+
+        console.error(`[Facturación] Error al anular la factura con CUF ${cuf}:`, mensajeError);
+
+        return { success: false, error: mensajeError };
+    }
 };

@@ -1,35 +1,27 @@
 import { Op, where, fn, col } from 'sequelize';
 import db from '../../database/index.js';
+import { fechaLocal } from '../../utils/fechas.js';
+import { whereStockVendible, whereLoteVendible, whereUbicacionVendible } from '../stock_distribucion/stock_vendible.js';
 
 const { Producto, Presentacion, Lote, StockDistribucion, Ubicacion, ProductoSerie, UnidadMedida } = db;
 
 const DIAS_ALERTA_VENCIMIENTO = 30;
 
+// Mismas condiciones que la venta (ver stock_vendible.js): lo que se muestra es lo que se descuenta
 const getStock = async (producto, id_sucursal) => {
-    const hoy = new Date();
-    hoy.setHours(0, 0, 0, 0);
-
-    const filtroFecha = {};
-    if (producto.maneja_vencimiento) {
-        filtroFecha[Op.or] = [
-            { fecha_vencimiento: null },
-            { fecha_vencimiento: { [Op.gte]: hoy } },
-        ];
-    }
-
     const lotesConStock = await Lote.findAll({
-        where: { id_producto: producto.id, ...filtroFecha },
+        where: whereLoteVendible([producto]),
         include: [
             {
                 model: StockDistribucion,
                 as: 'stock_distribuciones',
-                where: { cantidad_actual: { [Op.gt]: 0 } },
+                where: whereStockVendible(),
                 required: true,
                 include: [
                     {
                         model: Ubicacion,
                         as: 'ubicacion',
-                        where: { id_sucursal, esta_activo: true },
+                        where: whereUbicacionVendible(id_sucursal),
                         required: true,
                     },
                 ],
@@ -56,11 +48,11 @@ const getStock = async (producto, id_sucursal) => {
     // Alerta de vencimiento (solo si el producto lo maneja)
     const lotesProximosVencer = [];
     if (producto.maneja_vencimiento) {
-        const fechaLimite = new Date(hoy);
-        fechaLimite.setDate(fechaLimite.getDate() + DIAS_ALERTA_VENCIMIENTO);
+        // fecha_vencimiento es DATEONLY ('YYYY-MM-DD'): se compara como string con el día de Bolivia
+        const fechaLimite = fechaLocal(new Date(Date.now() + DIAS_ALERTA_VENCIMIENTO * 24 * 60 * 60 * 1000));
 
         for (const lote of lotesConStock) {
-            if (lote.fecha_vencimiento && new Date(lote.fecha_vencimiento) <= fechaLimite) {
+            if (lote.fecha_vencimiento && lote.fecha_vencimiento <= fechaLimite) {
                 const stockLote = lote.stock_distribuciones.reduce(
                     (a, sd) => a + parseFloat(sd.cantidad_actual), 0
                 );

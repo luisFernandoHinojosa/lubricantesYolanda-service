@@ -98,18 +98,47 @@ export const crearVentaSchema = z.object({
   body: crearVentaBodySchema,
 });
 
+// Porcentaje que se cobra adicional por emitir la factura (mismas reglas que en crearVenta)
+const porcentajeRecargoSchema = z.coerce
+  .number({ error: 'El porcentaje de recargo debe ser un número' })
+  .min(0, 'El porcentaje de recargo no puede ser negativo')
+  .max(100, 'El porcentaje de recargo no puede superar 100%');
+
 // ─── Facturar una venta registrada sin factura ───────────────────────────────
 export const facturarVentaSchema = z.object({
   params: z.object({
     id: idSchema('id'),
   }),
   body: z.object({
-    // Monto en Bs que se cobra adicional por emitir la factura (0 = sin recargo)
-    monto_recargo_iva: z.coerce
-      .number({ error: 'El monto de recargo debe ser un número' })
-      .min(0, 'El monto de recargo no puede ser negativo')
-      .default(0),
+    // 0 = sin recargo
+    porcentaje_recargo_iva: porcentajeRecargoSchema.default(0),
+    // Cómo pagó el cliente el recargo (se registra como un pago más de la venta)
+    metodo_pago_recargo: z
+      .enum(METODOS_PAGO_VALIDOS, `Debe ser uno de: ${METODOS_PAGO_VALIDOS.join(', ')}`)
+      .default('EFECTIVO'),
+    // Cliente ya registrado al que pasa la venta (p. ej. vendida a Público General).
+    // Solo para ventas de la sesión de caja abierta del cajero.
+    id_cliente: idSchema('id_cliente').optional(),
   }).prefault({}),
+});
+
+// ─── Reintentar / volver a emitir la factura de una venta ────────────────────
+// Solo corrige datos fiscales: los montos (incluido el recargo) no cambian.
+export const reintentarFacturaSchema = z.object({
+  params: z.object({
+    id: idSchema('id'),
+  }),
+  body: z.object({
+    // Cliente ya registrado al que pasa la venta y su factura; sin enviar se usa el de la venta
+    id_cliente: idSchema('id_cliente').optional(),
+  }).prefault({}),
+});
+
+// ─── Anular la factura de una venta (la venta sigue vigente) ─────────────────
+export const anularFacturaSchema = z.object({
+  params: z.object({
+    id: idSchema('id'),
+  }),
 });
 
 // ─── Listado ─────────────────────────────────────────────────────────────────

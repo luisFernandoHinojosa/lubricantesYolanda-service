@@ -3,22 +3,25 @@ import { ForbiddenError } from '../../errors/AppError.js';
 
 const { SesionCaja } = db;
 
+// Sesión de caja ABIERTA del usuario en sesión (req.user), o null si no tiene
+export const buscarSesionAbierta = async ({ id: id_usuario, id_sucursal }) => {
+    const empleado = await db.Empleado.findOne({ where: { usuario_id: id_usuario } });
+    if (!empleado) {
+        throw new ForbiddenError('El usuario no tiene un empleado asociado.');
+    }
+
+    return SesionCaja.findOne({
+        where: { id_empleado: empleado.id, id_sucursal, estado: 'ABIERTA' },
+    });
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MIDDLEWARE: Verificar que el cajero tiene una sesión de caja ABIERTA.
 // Adjunta `req.sesionCaja` para uso posterior en el request.
 // ─────────────────────────────────────────────────────────────────────────────
 export const requireSesionAbierta = async (req, res, next) => {
     try {
-        const { id: id_usuario, id_sucursal } = req.user;
-        const empleado = await db.Empleado.findOne({ where: { usuario_id: id_usuario } });
-        if (!empleado) {
-            throw new ForbiddenError('El usuario no tiene un empleado asociado.');
-        }
-        const id_empleado = empleado.id;
-
-        const sesion = await SesionCaja.findOne({
-            where: { id_empleado, id_sucursal, estado: 'ABIERTA' },
-        });
+        const sesion = await buscarSesionAbierta(req.user);
 
         if (!sesion) {
             throw new ForbiddenError('No hay sesión de caja abierta. Realice la apertura de caja primero.');

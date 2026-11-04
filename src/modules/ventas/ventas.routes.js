@@ -2,7 +2,13 @@ import { Router } from 'express';
 import { authenticate } from '../auth/auth.middleware.js';
 import { validate } from '../../middlewares/validate.js';
 import { requireSesionAbierta } from '../ventas/ventas.middleware.js';
-import { crearVentaSchema, listarVentasSchema, facturarVentaSchema } from '../ventas/ventas.schema.js';
+import {
+    crearVentaSchema,
+    listarVentasSchema,
+    facturarVentaSchema,
+    anularFacturaSchema,
+    reintentarFacturaSchema,
+} from '../ventas/ventas.schema.js';
 import {
     crearVenta,
     getVenta,
@@ -10,6 +16,7 @@ import {
     getResumenSesion,
     anularVenta,
     facturarVenta,
+    anularFactura,
     reintentarFactura,
 } from '../ventas/ventas.controller.js';
 
@@ -23,6 +30,7 @@ router.get('/sesion/:id_sesion/resumen', getResumenSesion);
 router.get('/:id', getVenta);
 router.put('/:id/anular', anularVenta);
 router.post('/:id/facturar', validate(facturarVentaSchema), facturarVenta);
-router.post('/:id/reintentar-factura', reintentarFactura);
+router.post('/:id/anular-factura', validate(anularFacturaSchema), anularFactura);
+router.post('/:id/reintentar-factura', validate(reintentarFacturaSchema), reintentarFactura);
 
 export default router;

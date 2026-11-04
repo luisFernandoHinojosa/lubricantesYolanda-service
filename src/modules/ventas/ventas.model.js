@@ -1,4 +1,4 @@
-import { Model, DataTypes } from 'sequelize';
+import { Model, DataTypes, Op } from 'sequelize';
 
 class Venta extends Model {
     static associate(models) {
@@ -9,7 +9,13 @@ class Venta extends Model {
         this.hasMany(models.DetalleVenta, { foreignKey: 'id_venta', as: 'detalles' });
         this.hasMany(models.Devolucion, { foreignKey: 'id_venta_original', as: 'devoluciones' });
         this.hasMany(models.PagoVenta, { foreignKey: 'id_venta', as: 'pagos' });
-        this.hasOne(models.Factura, { foreignKey: 'id_venta', as: 'factura' });
+        // Factura vigente (no anulada); las anuladas quedan en `facturas` como historial
+        this.hasOne(models.Factura, {
+            foreignKey: 'id_venta',
+            as: 'factura',
+            scope: { estado: { [Op.ne]: 'ANULADA' } },
+        });
+        this.hasMany(models.Factura, { foreignKey: 'id_venta', as: 'facturas' });
     }
 }
 

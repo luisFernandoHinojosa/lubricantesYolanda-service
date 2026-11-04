@@ -12,14 +12,40 @@ export class ProductoRepository {
     return this.productoModel.findByPk(id, { transaction });
   }
 
+  // En dos pasos: con LIMIT sobre el JOIN de presentaciones/lotes/stock, el límite contaría
+  // filas y no productos, y se perderían productos y registros de stock de la página.
+  //   1. La página de IDs, con los JOIN que necesita la búsqueda (categoría, marca, presentaciones).
+  //   2. Los productos completos de esos IDs, sin LIMIT.
   async findAllPaginated(query = {}, { transaction } = {}) {
-    const { where, limit, offset, order, page, perPage } = buildSequelizeQuery(query, PRODUCTO_CONFIG);
+    const { where: filtros, limit, offset, order, page, perPage } = buildSequelizeQuery(query, PRODUCTO_CONFIG);
+    const where = { ...filtros, esta_activo: true };
+    // Desempate por id: con nombres repetidos el orden no sería estable entre páginas
+    const orden = [...order, ['id', 'ASC']];
 
-    const { rows: productosRaw, count: total } = await this.productoModel.findAndCountAll({
-      where: {
-        ...where,
-        esta_activo: true,
-      },
+    const includesBusqueda = [
+      { model: db.Categoria, as: 'categoria', attributes: [] },
+      { model: db.Marca, as: 'marca', attributes: [] },
+      { model: db.Presentacion, as: 'presentaciones', attributes: [], required: false },
+    ];
+
+    const [total, pagina] = await Promise.all([
+      this.productoModel.count({ where, include: includesBusqueda, distinct: true, col: 'id', transaction }),
+      this.productoModel.findAll({
+        where,
+        include: includesBusqueda,
+        attributes: ['id'],
+        group: ['Producto.id'],
+        order: orden,
+        limit,
+        offset,
+        subQuery: false,
+        raw: true,
+        transaction,
+      }),
+    ]);
+
+    const productosRaw = await this.productoModel.findAll({
+      where: { id: pagina.map((p) => p.id) },
       include: [
         { model: db.Categoria, as: 'categoria', attributes: ['nombre'] },
         { model: db.Marca, as: 'marca', attributes: ['nombre'] },
@@ -43,19 +69,16 @@ export class ProductoRepository {
               attributes: ['nombre']
             },
             {
-              // where: { esta_activo: true, },
               model: db.StockDistribucion,
               as: 'stock_distribuciones',
-              include: [{ model: db.Ubicacion, as: 'ubicacion', attributes: ['nombre', 'tipo_area'] }],
+              where: { esta_activo: true },
+              required: false,
+              include: [{ model: db.Ubicacion, as: 'ubicacion', attributes: ['nombre', 'tipo_area', 'esta_activo'] }],
             },
           ],
         },
       ],
-      limit,
-      offset,
-      order,
-      distinct: true,
-      subQuery: false,
+      order: orden,
       transaction,
     });
 
@@ -124,12 +147,11 @@ export class ProductoRepository {
           required: false,
         },
         {
+          // Todos los lotes, también los inactivos: el detalle muestra el stock completo
+          // (el servicio separa el stock activo del inactivo)
           model: db.Lote,
           as: 'lotes',
           required: false,
-          where: {
-            esta_activo: true,
-          },
           include: [
             {
               model: db.Proveedor,
@@ -140,7 +162,7 @@ export class ProductoRepository {
               model: db.StockDistribucion,
               as: 'stock_distribuciones',
               required: false,
-              include: [{ model: db.Ubicacion, as: 'ubicacion', attributes: ['nombre', 'tipo_area'] }],
+              include: [{ model: db.Ubicacion, as: 'ubicacion', attributes: ['nombre', 'tipo_area', 'esta_activo'] }],
 
             },
           ],

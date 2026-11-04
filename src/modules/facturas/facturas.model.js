@@ -1,4 +1,4 @@
-import { Model, DataTypes } from 'sequelize';
+import { Model, DataTypes, Op } from 'sequelize';
 
 export default (sequelize) => {
     class Factura extends Model {
@@ -15,11 +15,12 @@ export default (sequelize) => {
         },
         id_venta: {
             type: DataTypes.UUID,
+            // Una venta puede tener varias facturas (las anuladas quedan como historial),
+            // pero una sola vigente: ver el índice parcial más abajo
             allowNull: false,
-            unique: true, // Relación 1 a 1
         },
         estado: {
-            type: DataTypes.ENUM('PENDIENTE', 'FACTURADA', 'ERROR'),
+            type: DataTypes.ENUM('PENDIENTE', 'FACTURADA', 'ERROR', 'ANULADA'),
             defaultValue: 'PENDIENTE',
             allowNull: false,
         },
@@ -69,6 +70,11 @@ export default (sequelize) => {
             allowNull: true,
             comment: 'Instante en que el SIAT validó la factura',
         },
+        fecha_anulacion: {
+            type: DataTypes.DATE,
+            allowNull: true,
+            comment: 'Instante en que el proveedor aceptó la anulación (ver migrate_factura_anulacion.js)',
+        },
         xml_factura: {
             type: DataTypes.TEXT,
             allowNull: true,
@@ -89,6 +95,15 @@ export default (sequelize) => {
         tableName: 'Facturas',
         timestamps: true,
         updatedAt: true,
+        // Creado por src/scripts/migrate_facturas_por_venta.js en las tablas existentes
+        indexes: [
+            {
+                name: 'Facturas_id_venta_vigente_uk',
+                unique: true,
+                fields: ['id_venta'],
+                where: { estado: { [Op.ne]: 'ANULADA' } },
+            },
+        ],
     });
 
     return Factura;

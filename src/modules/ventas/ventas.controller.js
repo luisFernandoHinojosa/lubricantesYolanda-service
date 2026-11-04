@@ -1,6 +1,6 @@
 import asyncHandler from '../../utils/asyncHandler.js';
 import * as ventaService from '../ventas/ventas.service.js';
-import * as facturacionService from '../ventas/facturacion.service.js';
+import { buscarSesionAbierta } from '../ventas/ventas.middleware.js';
 
 export const crearVenta = asyncHandler(async (req, res) => {
     const { id: id_usuario, name_user } = req.user;
@@ -58,9 +58,15 @@ export const facturarVenta = asyncHandler(async (req, res) => {
     const { name_user } = req.user;
     const { params, body } = req.validated;
 
+    // Cambiar de cliente solo se permite en ventas de la sesión de caja abierta
+    const sesion = body.id_cliente ? await buscarSesionAbierta(req.user) : null;
+
     const venta = await ventaService.facturarVenta({
         id_venta: params.id,
-        monto_recargo_iva: body.monto_recargo_iva,
+        porcentaje_recargo_iva: body.porcentaje_recargo_iva,
+        metodo_pago_recargo: body.metodo_pago_recargo,
+        id_cliente: body.id_cliente,
+        id_sesion_abierta: sesion?.id ?? null,
         name_user,
     });
 
@@ -75,15 +81,33 @@ export const facturarVenta = asyncHandler(async (req, res) => {
     });
 });
 
-export const reintentarFactura = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const { name_user } = req.user;
-    const resultado = await facturacionService.reintentarFactura(id, name_user);
+export const anularFactura = asyncHandler(async (req, res) => {
+    const venta = await ventaService.anularFacturaVenta({ id_venta: req.validated.params.id });
+
     return res.status(200).json({
         status: "success",
-        message: resultado?.success
-            ? 'Factura emitida exitosamente.'
-            : 'Error al emitir factura. Revise los detalles.',
-        data: resultado,
+        message: 'Factura anulada. Puede volver a emitirla desde Historial de ventas.',
+        data: venta,
+    });
+});
+
+export const reintentarFactura = asyncHandler(async (req, res) => {
+    const { name_user } = req.user;
+    const { params, body } = req.validated;
+
+    const venta = await ventaService.reintentarFacturaVenta({
+        id_venta: params.id,
+        id_cliente: body.id_cliente,
+        name_user,
+    });
+
+    const facturaFallida = venta.resultado_facturacion?.success === false;
+
+    return res.status(200).json({
+        status: "success",
+        message: facturaFallida
+            ? 'La factura no pudo emitirse. Revise los detalles e intente nuevamente.'
+            : 'Factura emitida exitosamente.',
+        data: venta,
     });
 });
