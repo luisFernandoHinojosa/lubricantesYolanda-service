@@ -63,9 +63,10 @@ export const clienteBaseSchema = z.object({
     .min(2, 'Mínimo 2 caracteres')
     .max(100, 'Máximo 100 caracteres'),
 
-  apellido_paterno: nullableString(50),
+  // Por ahora actúa como "apellidos" (paterno + materno). `apellido_materno` se quitará más adelante.
+  apellido_paterno: nullableString(100),
 
-  apellido_materno: nullableString(50),
+  apellido_materno: nullableString(100),
 
   correo_electronico: z
     .string()
@@ -74,13 +75,11 @@ export const clienteBaseSchema = z.object({
     .nullable()
     .optional(),
 
+  // Se mantiene como 'YYYY-MM-DD': pasarla por `new Date()` la lleva a medianoche UTC y
+  // la columna DATEONLY podría guardar el día anterior en la zona horaria del servidor.
   fecha_nacimiento: z.preprocess(
-    (v) => (v === '' || v === 'undefined' || v == null ? null : (typeof v === 'string' || v instanceof Date ? new Date(v) : v)),
-    z.date({
-      invalid_type_error: 'Debe ser una fecha válida',
-    })
-      .nullable()
-      .optional()
+    (v) => (v === '' || v === 'undefined' || v == null ? null : v instanceof Date ? v.toISOString().slice(0, 10) : v),
+    z.iso.date('Debe ser una fecha válida (AAAA-MM-DD)').nullable().optional()
   ),
 
   telefono: z
@@ -90,11 +89,7 @@ export const clienteBaseSchema = z.object({
     .max(20, 'El teléfono no puede superar 20 caracteres'),
   direccion: nullableString(1000),
 
-  puntos: z
-    .number({ invalid_type_error: 'Debe ser un número entero' })
-    .int()
-    .min(0, 'Los puntos no pueden ser negativos')
-    .optional(),
+  // `puntos` no se acepta aquí: solo cambian por ventas/anulaciones (o por un endpoint propio).
 
   genero: nullableEnum(['M', 'F', 'O']),
 
@@ -107,24 +102,56 @@ export const createClienteSchema = z.object({
   body: clienteBaseSchema.extend({ correo_electronico: correoConDefault }),
 });
 
+// En el update, un correo vacío significa "no cambiarlo" (no se puede dejar sin correo).
+const correoUpdate = z.preprocess(
+  (v) => (v === '' || v === 'undefined' || v == null ? undefined : v),
+  z.string().email('Correo electrónico inválido').max(100).optional()
+);
+
 export const updateClienteSchema = z.object({
   params: z.object({ id: z.string().uuid('ID inválido') }),
-  body: clienteBaseSchema.extend(camposSinDefault).partial().strict(),
+  body: clienteBaseSchema
+    .extend(camposSinDefault)
+    .extend({ correo_electronico: correoUpdate, esta_activo: z.boolean().optional() })
+    .partial()
+    .strict(),
+});
+
+// Ajuste manual de puntos: `puntos` es la variación (positiva suma, negativa resta).
+// Se usa una variación y no un valor absoluto para no pisar los puntos que suman las ventas.
+export const ajustarPuntosClienteSchema = z.object({
+  params: z.object({ id: z.string().uuid('ID inválido') }),
+  body: z
+    .object({
+      puntos: z
+        .number({ error: 'Los puntos deben ser un número entero' })
+        .int('Los puntos deben ser un número entero')
+        .refine((v) => v !== 0, 'La variación de puntos no puede ser 0'),
+      motivo: z.string().trim().min(1).max(200).optional(),
+    })
+    .strict(),
 });
 
 export const getClienteSchema = z.object({
   params: z.object({ id: z.string().uuid('ID inválido') }),
 });
 
+export const getClienteByCiSchema = z.object({
+  params: z.object({
+    ci: z.string().trim().min(1, 'El CI o NIT es obligatorio').max(20, 'El CI o NIT no puede superar 20 caracteres'),
+  }),
+});
+
 export const listClientesSchema = z.object({
   query: z.object({
     page: z.coerce.number().int().positive().default(1),
     perPage: z.coerce.number().int().min(1).max(100).default(20),
-    sort: z.enum(['asc', 'desc']).default('desc'),
-    sortBy: z.string().optional(),
-    search: z.string().max(100).optional(),
+    sortBy: z.enum(['createdAt', 'nombre', 'puntos', 'apellido_paterno']).optional(),
+    sortOrder: z.enum(['asc', 'desc', 'ASC', 'DESC']).optional(),
+    search: z.string().trim().max(100).optional(),
     tipo_cliente: z.enum(['MAY', 'MIN']).optional(),
-    esta_activo: z.coerce.boolean().optional(),
+    // z.coerce.boolean() convertiría "false" en true
+    esta_activo: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
   }),
 });
 

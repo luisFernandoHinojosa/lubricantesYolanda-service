@@ -11,10 +11,10 @@ export default (sequelize) => {
 
     get esMayorDeEdad() {
       if (!this.fecha_nacimiento) return null;
-      const hoy = new Date();
-      const nacimiento = new Date(this.fecha_nacimiento);
-      const edad = hoy.getFullYear() - nacimiento.getFullYear();
-      return edad >= 18;
+      // fecha_nacimiento es DATEONLY ('YYYY-MM-DD'): se compara por partes para evitar desfases de zona horaria
+      const [anio, mes, dia] = String(this.fecha_nacimiento).split('-').map(Number);
+      const cumple18 = new Date(anio + 18, mes - 1, dia);
+      return cumple18 <= new Date();
     }
   }
 
@@ -47,6 +47,7 @@ export default (sequelize) => {
         allowNull: false,
         validate: { notEmpty: true, len: [2, 100] },
       },
+      // Por ahora guarda los apellidos completos (paterno + materno); apellido_materno se quitará más adelante
       apellido_paterno: {
         type: DataTypes.STRING(100),
         allowNull: true,
@@ -70,7 +71,6 @@ export default (sequelize) => {
       telefono: {
         type: DataTypes.STRING(50),
         allowNull: false,
-        defaultValue: null,
       },
       direccion: {
         type: DataTypes.TEXT,

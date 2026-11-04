@@ -7,12 +7,14 @@ import {
   createClienteSchema,
   updateClienteSchema,
   getClienteSchema,
+  getClienteByCiSchema,
+  ajustarPuntosClienteSchema,
   listClientesSchema,
 } from './clientes.schema.js';
 
 const router = Router();
 
-// router.use(authenticate);
+router.use(authenticate);
 
 router
   .route('/')
@@ -25,12 +27,16 @@ router
 
 router
   .route('/ci/:ci')
-  .get(clienteController.getByCi);
+  .get(validate(getClienteByCiSchema), clienteController.getByCi);
+
+router
+  .route('/:id/puntos')
+  .patch(validate(ajustarPuntosClienteSchema), checkClienteExists, clienteController.ajustarPuntos);
 
 router
   .route('/:id')
   .get(validate(getClienteSchema), clienteController.getById)
-  .put(checkClienteExists, validate(updateClienteSchema), clienteController.update)
-  .delete(checkClienteExists, clienteController.remove);
+  .put(validate(updateClienteSchema), checkClienteExists, clienteController.update)
+  .delete(validate(getClienteSchema), checkClienteExists, clienteController.remove);
 
 export default router;

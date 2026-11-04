@@ -1,6 +1,7 @@
-import { Op } from 'sequelize';
+import { Op, fn, col, literal, where as sqlWhere } from 'sequelize';
 import db from '../../database/index.js';
 import { buildSequelizeQuery } from '../../utils/queryBuilder.js';
+import { CI_CLIENTE_GENERICO } from '../../constants/business.constants.js';
 
 const CLIENTE_QUERY_CONFIG = {
     searchableFields: ['nombre', 'apellido_paterno', 'ci'],
@@ -30,7 +31,18 @@ export class ClienteRepository {
         const { where, limit, offset, order, page, perPage } =
             buildSequelizeQuery(query, CLIENTE_QUERY_CONFIG);
 
-        where.ci = { [Op.ne]: '000000' };
+        // Además de cada campo por separado, se busca sobre el nombre completo
+        // ("Juan Pérez Gómez" no coincide con ningún campo individual)
+        if (query.search) {
+            where[Op.or].push(
+                sqlWhere(
+                    fn('concat_ws', ' ', col('nombre'), col('apellido_paterno'), col('apellido_materno')),
+                    { [Op.iLike]: `%${query.search}%` }
+                )
+            );
+        }
+
+        where.ci = { [Op.ne]: CI_CLIENTE_GENERICO };
 
         const { rows, count } = await this.clienteModel.findAndCountAll({
             where,
@@ -62,6 +74,15 @@ export class ClienteRepository {
         return updated ?? null;
     }
 
+    // Suma `delta` (puede ser negativo) en una sola sentencia, sin bajar de 0
+    async ajustarPuntos(id, delta, { transaction } = {}) {
+        const [, [updated]] = await this.clienteModel.update(
+            { puntos: fn('GREATEST', 0, literal(`"puntos" + ${Number(delta)}`)) },
+            { where: { id }, returning: true, transaction }
+        );
+        return updated ?? null;
+    }
+
     async softDelete(id, { transaction } = {}) {
         return this.clienteModel.update(
             { esta_activo: false },
@@ -76,7 +97,7 @@ export class ClienteRepository {
     async top50ByPoints({ transaction } = {}) {
         return this.clienteModel.findAll({
             attributes: ['id', 'nombre', 'puntos', 'apellido_paterno', 'apellido_materno'],
-            where: { esta_activo: true },
+            where: { esta_activo: true, ci: { [Op.ne]: CI_CLIENTE_GENERICO } },
             order: [['puntos', 'DESC']],
             limit: 50,
             transaction,
