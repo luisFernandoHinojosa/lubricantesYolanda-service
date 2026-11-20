@@ -22,7 +22,6 @@ export default (sequelize) => {
             type: DataTypes.ENUM(...METODOS_PAGO_VALIDOS),
             allowNull: false
         },
-        // Posición del pago en el listado enviado; el primero (0) se usa para la factura
         orden: {
             type: DataTypes.INTEGER,
             allowNull: false,
