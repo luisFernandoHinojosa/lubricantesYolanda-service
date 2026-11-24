@@ -114,12 +114,6 @@ export const PRESENTACION_CONFIG = {
   defaultSort: ['nombre', 'ASC']
 }
 
-export const KARDEX_MOVIMIENTO_CONFIG = {
-  searchableFields: ['$lote.codigo_lote$', '$lote.producto.nombre_comercial$'],
-  filterableFields: ['id_lote', 'tipo_movimiento', 'id_ubicacion_origen', 'id_ubicacion_destino', 'id_usuario'],
-  defaultSort: ['fecha', 'DESC']
-}
-
 export const SUCURSAL_CONFIG = {
   searchableFields: ['nombre', 'ciudad', 'responsable'],
   filterableFields: ['esta_activo', 'ciudad'],

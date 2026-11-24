@@ -1,18 +1,20 @@
-import express from 'express';
-import * as kardexController from './kardex_movimientos.controller.js';
-import { validateCreateKardexMovimiento, validateUpdateKardexMovimiento, checkKardexMovimientoExists } from './kardex_movimientos.middleware.js';
-import { sanitizeInput } from '../../middlewares/sanitizer.middleware.js';
-// Import auth middleware if user tracking is needed, e.g., import { protect } from '../../middlewares/auth.middleware.js';
+import { Router } from 'express';
+import { kardexMovimientoController } from './kardex_movimientos.controller.js';
+import { checkKardexMovimientoExists } from './kardex_movimientos.middleware.js';
+import { validate } from '../../middlewares/validate.js';
+import { authenticate } from '../auth/auth.middleware.js';
+import { listKardexSchema, getKardexSchema, tarjetaKardexSchema } from './kardex_movimientos.schema.js';
 
-const router = express.Router();
+// El kardex es de solo lectura: los movimientos los generan compras, ventas, devoluciones,
+// lotes y stock_distribucion (traslados/ajustes). Las correcciones se hacen con un AJUSTE.
+const router = Router();
 
-router.route('/')
-    .get(kardexController.findAll)
-    .post(sanitizeInput, validateCreateKardexMovimiento, kardexController.create);
+router.use(authenticate);
 
-router.route('/:id')
-    .get(checkKardexMovimientoExists, kardexController.findOne)
-    .put(sanitizeInput, checkKardexMovimientoExists, validateUpdateKardexMovimiento, kardexController.update)
-    .delete(checkKardexMovimientoExists, kardexController.remove);
+router.get('/', validate(listKardexSchema), kardexMovimientoController.list);
+
+router.get('/producto/:id_producto', validate(tarjetaKardexSchema), kardexMovimientoController.tarjeta);
+
+router.get('/:id', validate(getKardexSchema), checkKardexMovimientoExists, kardexMovimientoController.getById);
 
 export default router;
