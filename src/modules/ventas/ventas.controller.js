@@ -29,6 +29,12 @@ export const getVenta = asyncHandler(async (req, res) => {
     return res.status(200).json({ status: "success", message: 'Venta obtenida exitosamente.', data: venta });
 });
 
+export const getVentaPorComprobante = asyncHandler(async (req, res) => {
+    const { numero } = req.params;
+    const venta = await ventaService.getVentaByComprobante(numero);
+    return res.status(200).json({ status: "success", message: 'Venta obtenida exitosamente.', data: venta });
+});
+
 export const listarVentas = asyncHandler(async (req, res) => {
     const resultado = await ventaService.findAllVentas(req.validated.query);
 

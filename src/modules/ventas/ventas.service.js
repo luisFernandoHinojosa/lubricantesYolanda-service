@@ -1030,6 +1030,21 @@ export const getVentaById = async (id) => {
     return ventaDetalleDTO(v);
 };
 
+// Detalle de una venta por su número de comprobante (único), p. ej. "TK-43EA-20260717-0008".
+// Lo usa el kardex, cuyo documento de origen solo trae el número, no el id.
+export const getVentaByComprobante = async (numero_comprobante) => {
+    const venta = await Venta.findOne({
+        where: { numero_comprobante },
+        attributes: ['id'],
+    });
+
+    if (!venta) {
+        throw new NotFoundError('Venta', `No se encontró la venta ${numero_comprobante}.`);
+    }
+
+    return getVentaById(venta.id);
+};
+
 // ─── Listado de ventas ───────────────────────────────────────────────────────
 // Solo relaciones 1:1 en el JOIN (cliente, cajero, sucursal, factura): así LIMIT/OFFSET
 // cuentan ventas y no filas repetidas. Pagos y devoluciones van en consultas aparte

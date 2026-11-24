@@ -12,6 +12,7 @@ import {
 import {
     crearVenta,
     getVenta,
+    getVentaPorComprobante,
     listarVentas,
     getResumenSesion,
     anularVenta,
@@ -27,6 +28,8 @@ router.use(authenticate);
 router.post('/', requireSesionAbierta, validate(crearVentaSchema), crearVenta);
 router.get('/', validate(listarVentasSchema), listarVentas);
 router.get('/sesion/:id_sesion/resumen', getResumenSesion);
+// Antes de '/:id' para que "comprobante" no se tome como un id
+router.get('/comprobante/:numero', getVentaPorComprobante);
 router.get('/:id', getVenta);
 router.put('/:id/anular', anularVenta);
 router.post('/:id/facturar', validate(facturarVentaSchema), facturarVenta);
